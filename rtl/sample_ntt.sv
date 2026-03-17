@@ -304,8 +304,8 @@ module sample_ntt #(
                                          - {1'b0, oq_valid_nxt[1]};
 
                 can_process = have_triple
-                            & (oq_free_after_deq >= (triple_fills_packer ? 2'd1 : 2'd0))
-                            & (coeff_count_nxt < 9'(TARGET_COEFFS));
+                            && (oq_free_after_deq >= (triple_fills_packer ? 2'd1 : 2'd0))
+                            && (coeff_count_nxt < 9'(TARGET_COEFFS));
 
                 if (can_process) begin
                     // Pop 3 bytes from the FIFO.
