@@ -171,14 +171,20 @@ module sample_ntt_tb;
     endtask
 
     // =====================================================================
-    // Output backpressure: ready ~75 % of cycles
+    // Output backpressure: ready 3 out of every 4 cycles (~75 %)
     // =====================================================================
+    // Uses a simple 2-bit counter instead of $urandom_range, which
+    // is unsupported in ModelSim ASE.
 
+    logic [1:0] bp_cnt;
     always_ff @(posedge clk or posedge rst) begin
-        if (rst)
+        if (rst) begin
             t_ready_i <= 1'b0;
-        else
-            t_ready_i <= ($urandom_range(0, 3) != 0);
+            bp_cnt    <= 2'd0;
+        end else begin
+            bp_cnt    <= bp_cnt + 2'd1;
+            t_ready_i <= (bp_cnt != 2'd0);  // low 1-in-4 cycles
+        end
     end
 
     // =====================================================================
@@ -222,7 +228,28 @@ module sample_ntt_tb;
                 end
             end
 
+            $display("[TB] Output beat %0d: coeffs %0d-%0d  t_last=%0b",
+                     observed_count / 4, observed_count, observed_count + 3, t_last_o);
             observed_count <= observed_count + 4;
+        end
+    end
+
+    // =====================================================================
+    // Periodic debug: print DUT state every 500 cycles
+    // =====================================================================
+
+    int unsigned cycle_cnt;
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst)
+            cycle_cnt <= 0;
+        else begin
+            cycle_cnt <= cycle_cnt + 1;
+            if (cycle_cnt % 500 == 0)
+                $display("[DBG] cycle=%0d  state=%0d  fifo_cnt=%0d  coeff_cnt=%0d  "
+                         "oq0v=%0b oq1v=%0b  agg_cnt=%0d  t_ready_i=%0b  t_valid_o=%0b  done=%0b",
+                         cycle_cnt, dut.state, dut.fifo_count, dut.coeff_count,
+                         dut.oq_valid[0], dut.oq_valid[1], dut.agg_count,
+                         t_ready_i, t_valid_o, done);
         end
     end
 
@@ -241,6 +268,8 @@ module sample_ntt_tb;
 
         generate_stimulus();
         build_golden_model();
+        $display("[TB] Golden model built: %0d coefficients from %0d bytes.",
+                 golden_coeffs.size(), stimulus_bytes.size());
 
         // -- Release reset --
         repeat (5) @(posedge clk);
