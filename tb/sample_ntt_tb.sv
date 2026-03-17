@@ -62,6 +62,18 @@ module sample_ntt_tb;
     int unsigned               golden_coeffs  [$];     // Expected 12-bit values
     int unsigned               observed_count;
     int unsigned               error_count;
+    logic                      done_seen;     // Latched version of done pulse
+
+    // =====================================================================
+    // Latch the one-cycle done pulse so the TB never misses it
+    // =====================================================================
+
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst)
+            done_seen <= 1'b0;
+        else if (done)
+            done_seen <= 1'b1;
+    end
 
     // =====================================================================
     // DUT instantiation
@@ -140,7 +152,7 @@ module sample_ntt_tb;
         int byte_idx  = 0;
         int beat_size;
 
-        while ((byte_idx < stimulus_bytes.size()) && !done) begin
+        while ((byte_idx < stimulus_bytes.size()) && !done_seen) begin
             beat_size = stimulus_bytes.size() - byte_idx;
             if (beat_size > KEEP_WIDTH) beat_size = KEEP_WIDTH;
 
@@ -155,9 +167,10 @@ module sample_ntt_tb;
             t_last_i  = ((byte_idx + beat_size) >= stimulus_bytes.size());
             t_valid_i = 1'b1;
 
-            // Wait until DUT accepts the beat (valid && ready at posedge).
+            // Wait until DUT accepts the beat or done fires.
             @(posedge clk);
-            while (!t_ready_o) @(posedge clk);
+            while (!t_ready_o && !done_seen) @(posedge clk);
+            if (done_seen) break;
 
             byte_idx += beat_size;
         end
@@ -282,7 +295,7 @@ module sample_ntt_tb;
         fork
             begin
                 drive_axi_sink();
-                wait (done == 1'b1);
+                wait (done_seen == 1'b1);
             end
             begin : watchdog
                 repeat (50_000) @(posedge clk);
