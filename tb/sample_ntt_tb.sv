@@ -1,6 +1,6 @@
 // -----------------------------------------------------------------------------
 // Author      : Salwan Aldhahab
-// Module      : tb_sample_ntt
+// Module      : sample_ntt_tb
 // Standard    : FIPS 203 ML-KEM — verification of Algorithm 7 (SampleNTT)
 //
 // Description :
@@ -17,7 +17,7 @@
 //   7. Reports PASS / FAIL at the end.
 // -----------------------------------------------------------------------------
 
-module tb_sample_ntt;
+module sample_ntt_tb;
 
     // =====================================================================
     // Parameters
