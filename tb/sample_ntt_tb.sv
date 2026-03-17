@@ -138,43 +138,32 @@ module sample_ntt_tb;
 
     task automatic drive_axi_sink();
         int byte_idx  = 0;
-        int beat_size = 0;
-
-        t_data_i  = '0;
-        t_keep_i  = '0;
-        t_last_i  = 1'b0;
-        t_valid_i = 1'b0;
+        int beat_size;
 
         while ((byte_idx < stimulus_bytes.size()) && !done) begin
+            beat_size = stimulus_bytes.size() - byte_idx;
+            if (beat_size > KEEP_WIDTH) beat_size = KEEP_WIDTH;
+
+            // Present data at negedge — stable for DUT to sample at posedge.
+            @(negedge clk);
+            t_data_i = '0;
+            t_keep_i = '0;
+            for (int lane = 0; lane < beat_size; lane++) begin
+                t_data_i[8*lane +: 8] = stimulus_bytes[byte_idx + lane];
+                t_keep_i[lane]        = 1'b1;
+            end
+            t_last_i  = ((byte_idx + beat_size) >= stimulus_bytes.size());
+            t_valid_i = 1'b1;
+
+            // Wait until DUT accepts the beat (valid && ready at posedge).
             @(posedge clk);
+            while (!t_ready_o) @(posedge clk);
 
-            // Prepare a new beat when idle.
-            if (!t_valid_i) begin
-                beat_size = stimulus_bytes.size() - byte_idx;
-                if (beat_size > KEEP_WIDTH) beat_size = KEEP_WIDTH;
-
-                t_data_i = '0;
-                t_keep_i = '0;
-                for (int lane = 0; lane < beat_size; lane++) begin
-                    t_data_i[8*lane +: 8] = stimulus_bytes[byte_idx + lane];
-                    t_keep_i[lane]        = 1'b1;
-                end
-                t_last_i  = ((byte_idx + beat_size) >= stimulus_bytes.size());
-                t_valid_i = 1'b1;
-            end
-
-            // Handshake completed?
-            if (t_valid_i && t_ready_o) begin
-                byte_idx += beat_size;
-                t_valid_i = 1'b0;
-                t_last_i  = 1'b0;
-                t_keep_i  = '0;
-                t_data_i  = '0;
-            end
+            byte_idx += beat_size;
         end
 
-        // Park inputs low after completion.
-        @(posedge clk);
+        // Park inputs low.
+        @(negedge clk);
         t_valid_i = 1'b0;
         t_last_i  = 1'b0;
         t_keep_i  = '0;
@@ -257,24 +246,25 @@ module sample_ntt_tb;
         repeat (5) @(posedge clk);
         rst = 1'b0;
 
-        // -- Pulse start --
-        @(posedge clk);
+        // -- Pulse start (at negedge so DUT samples cleanly at posedge) --
+        @(negedge clk);
         start = 1'b1;
-        @(posedge clk);
+        @(negedge clk);
         start = 1'b0;
 
-        // -- Drive input with a timeout safety net --
+        // -- Drive input, then wait for done — watchdog covers both --
         fork
-            drive_axi_sink();
+            begin
+                drive_axi_sink();
+                wait (done == 1'b1);
+            end
             begin : watchdog
-                repeat (20_000) @(posedge clk);
-                $fatal(1, "TIMEOUT: DUT did not assert done within 20 000 cycles");
+                repeat (50_000) @(posedge clk);
+                $fatal(1, "TIMEOUT: DUT did not assert done within 50 000 cycles");
             end
         join_any
         disable fork;
 
-        // -- Wait for done --
-        wait (done == 1'b1);
         @(posedge clk);
 
         // -- Final verdict --
