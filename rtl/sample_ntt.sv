@@ -1,3 +1,25 @@
+// -----------------------------------------------------------------------------
+// Author: Salwan Aldhahab
+// Module: sample_ntt
+// Target: FIPS 203 ML-KEM (Kyber-style rejection sampling for NTT coefficients)
+//
+// Functionality:
+// - Accepts a byte stream through an AXI4-Stream sink interface.
+// - Consumes bytes in 3-byte chunks and forms two 12-bit candidates:
+//     d1 = b0 + 256*(b1[3:0])
+//     d2 = b1[7:4] + 16*b2
+// - Applies rejection sampling with modulus q = 3329.
+// - Emits accepted coefficients as 16-bit AXI4-Stream words until 256
+//   coefficients are produced.
+//
+// Working Description:
+// - Input bytes are buffered in a 64-byte circular FIFO.
+// - A 2-entry output skid queue absorbs output backpressure.
+// - The datapath only consumes a 3-byte chunk when enough output queue space
+//   exists for all coefficients that could be emitted from that chunk.
+// - The module asserts t_last_o on the 256th emitted coefficient and pulses
+//   done for one cycle after the output queue is fully drained.
+// -----------------------------------------------------------------------------
 module sample_ntt #(
     parameter int DWIDTH = 256, // Seed size in bits (32 bytes per AXI beat)
     parameter int KEEP_WIDTH = DWIDTH / 8 // Number of valid bytes per AXI beat
@@ -44,18 +66,6 @@ module sample_ntt #(
     logic [6:0]  fifo_count;      // 0..64
     logic [5:0]  fifo_rd_ptr;     // circular
     logic [5:0]  fifo_wr_ptr;     // circular
-
-    // Helper: count valid bytes in keep (for partial last-beat safety)
-    function automatic int count_keep_bytes(input logic [KEEP_WIDTH-1:0] keep);
-        int c;
-        begin
-            c = 0;
-            for (int i = 0; i < KEEP_WIDTH; i++) begin
-                if (keep[i]) c++;
-            end
-            return c;
-        end
-    endfunction
 
     // Helper: read FIFO byte at offset (0 = oldest)
     function automatic logic [7:0] fifo_peek(input int offset);
@@ -212,62 +222,78 @@ module sample_ntt #(
                     // AXI sink enqueue (from Keccak)
                     // ----------------------------
                     if (t_valid_i && t_ready_o) begin
+                        int pushed;
+                        logic [5:0] wr_ptr_next;
+
                         // Append valid bytes according to t_keep_i
                         // AXI convention: t_data_i is [DWIDTH-1:0]; treat as 32 bytes little-endian per lane order.
                         // We map byte i to t_data_i[8*i +: 8]
+                        pushed      = 0;
+                        wr_ptr_next = fifo_wr_ptr;
                         for (k = 0; k < KEEP_WIDTH; k++) begin
-                            if (t_keep_i[k] && (fifo_count < 7'd64)) begin
-                                fifo_mem[fifo_wr_ptr] <= t_data_i[8*k +: 8];
-                                fifo_wr_ptr <= fifo_wr_ptr + 6'd1;
-                                fifo_count  <= fifo_count + 7'd1;
+                            if (t_keep_i[k] && ((fifo_count + pushed) < 7'd64)) begin
+                                fifo_mem[wr_ptr_next] <= t_data_i[8*k +: 8];
+                                wr_ptr_next = wr_ptr_next + 6'd1;
+                                pushed      = pushed + 1;
                             end
                         end
+                        fifo_wr_ptr <= wr_ptr_next;
+                        fifo_count  <= fifo_count + pushed;
                     end
 
                     // ----------------------------
                     // Process 3-byte chunk -> up to 2 coeffs
                     // ----------------------------
                     if (do_process_chunk) begin
+                        logic [8:0] coeff_next;
+                        logic       q0_valid_next, q1_valid_next;
+                        out_item_t  q0_next, q1_next;
+
                         // consume 3 bytes
                         fifo_rd_ptr <= fifo_rd_ptr + 6'd3;
                         fifo_count  <= fifo_count  - 7'd3;
 
+                        coeff_next    = coeff_count;
+                        q0_valid_next = out_q0_valid;
+                        q1_valid_next = out_q1_valid;
+                        q0_next       = out_q0;
+                        q1_next       = out_q1;
+
                         // push outputs in order d1 then d2 if valid
                         // push into q0 if empty else q1
-                        if (v1 && (coeff_count < 9'd256)) begin
+                        if (v1 && (coeff_next < 9'd256)) begin
                             out_item_t item1;
                             item1.data = {4'b0, d1}; // 12-bit -> 16-bit
-                            item1.last = (coeff_count == 9'd255); // last when emitting 256th coeff
-                            if (!out_q0_valid) begin
-                                out_q0       <= item1;
-                                out_q0_valid <= 1'b1;
+                            item1.last = (coeff_next == 9'd255); // last when emitting 256th coeff
+                            if (!q0_valid_next) begin
+                                q0_next       = item1;
+                                q0_valid_next = 1'b1;
                             end else begin
-                                out_q1       <= item1;
-                                out_q1_valid <= 1'b1;
+                                q1_next       = item1;
+                                q1_valid_next = 1'b1;
                             end
-                            coeff_count <= coeff_count + 9'd1;
+                            coeff_next = coeff_next + 9'd1;
                         end
 
-                        // For d2, be careful: coeff_count may have updated above.
-                        // Use a local computed "next_count" behavior via conditional checks:
-                        // We'll recompute based on v1.
-                        if (v2) begin
-                            logic [8:0] base_count;
-                            base_count = coeff_count + (v1 ? 9'd1 : 9'd0);
-                            if (base_count < 9'd256) begin
-                                out_item_t item2;
-                                item2.data = {4'b0, d2};
-                                item2.last = (base_count == 9'd255);
-                                if (!out_q0_valid) begin
-                                    out_q0       <= item2;
-                                    out_q0_valid <= 1'b1;
-                                end else if (!out_q1_valid) begin
-                                    out_q1       <= item2;
-                                    out_q1_valid <= 1'b1;
-                                end
-                                coeff_count <= base_count + 9'd1;
+                        if (v2 && (coeff_next < 9'd256)) begin
+                            out_item_t item2;
+                            item2.data = {4'b0, d2};
+                            item2.last = (coeff_next == 9'd255);
+                            if (!q0_valid_next) begin
+                                q0_next       = item2;
+                                q0_valid_next = 1'b1;
+                            end else if (!q1_valid_next) begin
+                                q1_next       = item2;
+                                q1_valid_next = 1'b1;
                             end
+                            coeff_next = coeff_next + 9'd1;
                         end
+
+                        out_q0       <= q0_next;
+                        out_q1       <= q1_next;
+                        out_q0_valid <= q0_valid_next;
+                        out_q1_valid <= q1_valid_next;
+                        coeff_count  <= coeff_next;
                     end
 
                     // ----------------------------
