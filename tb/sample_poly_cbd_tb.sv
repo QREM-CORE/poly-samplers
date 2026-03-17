@@ -1,2 +1,2 @@
-module tb_sample_poly_cbd;
+module sample_poly_cbd_tb;
 endmodule
