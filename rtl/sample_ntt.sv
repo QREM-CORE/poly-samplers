@@ -20,8 +20,8 @@
 // Micro-architecture:
 //
 //   ┌───────────┐   AXI-S sink   ┌────────────┐  3-byte   ┌──────────┐
-//   │  Keccak   │──────────────▸│  Byte FIFO  │─────────▸│ Rejection │
-//   │  (SHAKE)  │  256b beats    │  64 entries │  triples  │  Sampler  │
+//   │  Keccak   │──────────────▸ │ Byte FIFO  │─────────▸ │Rejection │
+//   │  (SHAKE)  │  256b beats    │ 64 entries │  triples  │  Sampler │
 //   └───────────┘                └────────────┘           └────┬─────┘
 //                                                              │ 0-2 coeffs/cycle
 //                                                         ┌────▼─────┐
