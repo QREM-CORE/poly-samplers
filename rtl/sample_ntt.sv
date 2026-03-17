@@ -98,18 +98,18 @@ module sample_ntt #(
     state_t state;
 
     // -- Byte FIFO --
-    logic [7:0]  fifo [0:FIFO_DEPTH-1];
+    logic [7:0]  fifo [FIFO_DEPTH];
     logic [6:0]  fifo_count;    // 0 .. 64
     logic [5:0]  fifo_wr_ptr;
     logic [5:0]  fifo_rd_ptr;
 
     // -- Coefficient aggregator (collects 4 before emitting a beat) --
-    logic [11:0] agg [0:3];
+    logic [11:0] agg [4];
     logic [2:0]  agg_count;     // 0 .. 4
 
     // -- 2-entry output skid buffer --
-    beat_t       oq      [0:1];
-    logic        oq_valid[0:1];
+    beat_t       oq      [2];
+    logic        oq_valid[2];
 
     // -- Global progress --
     logic [8:0]  coeff_count;   // 0 .. 256  (9 bits)
@@ -204,8 +204,8 @@ module sample_ntt #(
     //    variables inside always_ff — portable across all synthesis tools.
 
     // -- FIFO write ports (one per input byte lane) --
-    logic        fifo_wr_en   [0:KEEP_WIDTH-1];
-    logic [5:0]  fifo_wr_addr [0:KEEP_WIDTH-1];
+    logic        fifo_wr_en   [KEEP_WIDTH];
+    logic [5:0]  fifo_wr_addr [KEEP_WIDTH];
 
     // -- Next-state wires --
     state_t      state_nxt;
@@ -213,10 +213,10 @@ module sample_ntt #(
     logic [6:0]  fifo_count_nxt;
     logic [5:0]  fifo_wr_ptr_nxt;
     logic [5:0]  fifo_rd_ptr_nxt;
-    logic [11:0] agg_nxt      [0:3];
+    logic [11:0] agg_nxt      [4];
     logic [2:0]  agg_count_nxt;
-    beat_t       oq_nxt       [0:1];
-    logic        oq_valid_nxt [0:1];
+    beat_t       oq_nxt       [2];
+    logic        oq_valid_nxt [2];
     logic [8:0]  coeff_count_nxt;
 
     // -- Working signals for Step C --
