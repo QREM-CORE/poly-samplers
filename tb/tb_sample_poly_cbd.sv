@@ -1,2 +1,0 @@
-module tb_sample_poly_cbd;
-endmodule
