@@ -3,4 +3,4 @@ transcript
 *.vcd
 *.macro
 *.log
-*.txt
+*.txtobj_dir/
