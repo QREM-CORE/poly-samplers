@@ -178,9 +178,6 @@ module sample_ntt_tb;
         // Park inputs low.
         @(negedge clk);
         t_valid_i = 1'b0;
-        t_last_i  = 1'b0;
-        t_keep_i  = '0;
-        t_data_i  = '0;
     endtask
 
     // =====================================================================
