@@ -21,12 +21,12 @@
 //   ┌───────────┐   AXI-S sink   ┌────────────┐  ETA-byte  ┌──────────┐
 //   │  Keccak   │──────────────▸ │ Byte FIFO  │──────────▸ │   CBD    │
 //   │  (SHAKE)  │  256b beats    │ 64 entries │  chunks    │  Sampler │
-//   └───────────┘                └────────────┘           └────┬─────┘
-//                                                              │ 4 coeffs/cycle
-//                                                         ┌────▼─────┐
-//                                     AXI-S source        │ Skid Buf │
-//                               ◂─────────────────────────│ (2-deep) │
-//                                 48-bit beats            └──────────┘
+//   └───────────┘                └────────────┘            └────┬─────┘
+//                                                               │ 4 coeffs/cycle
+//                                                          ┌────▼─────┐
+//                                      AXI-S source        │ Skid Buf │
+//                                ◂─────────────────────────│ (2-deep) │
+//                                  48-bit beats            └──────────┘
 //
 //   • Byte FIFO       – 64-byte circular buffer absorbing AXI beats.
 //   • CBD sampler      – purely combinational; peeks ETA bytes, produces 4
