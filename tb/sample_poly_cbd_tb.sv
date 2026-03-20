@@ -10,7 +10,7 @@
 //   2. Runs the same CBD sampling algorithm in software to build a golden
 //      list of 256 expected 12-bit coefficients.
 //   3. Drives the byte stream into the DUT over an AXI4-Stream sink.
-//   4. Applies randomised output backpressure (~25 % stall rate).
+//   4. Applies deterministic 3-of-4-cycle output backpressure (~25 % stall rate).
 //   5. Unpacks each 48-bit output beat into four 12-bit coefficients and
 //      compares lane-by-lane against the golden model.
 //   6. Checks t_last_o timing and t_keep_o correctness.
