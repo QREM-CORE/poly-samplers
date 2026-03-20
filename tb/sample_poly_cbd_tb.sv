@@ -113,7 +113,7 @@ module sample_poly_cbd_tb;
     // =====================================================================
 
     task automatic generate_stimulus();
-        int seed = 32'hCBD0_2026;
+        int unsigned seed = 32'hCBD0_2026;
         stimulus_bytes.delete();
         for (int i = 0; i < INPUT_BYTES; i++) begin
             stimulus_bytes.push_back($urandom(seed));
