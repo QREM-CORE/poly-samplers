@@ -178,17 +178,7 @@ module sample_poly_cbd #(
     end
 
     // =========================================================================
-    // 6. COMBINATIONAL: Flow-control gating
-    // =========================================================================
-
-    logic [1:0] oq_free_slots;
-
-    always_comb begin
-        oq_free_slots = 2'd2 - {1'b0, oq_valid[0]} - {1'b0, oq_valid[1]};
-    end
-
-    // =========================================================================
-    // 7. COMBINATIONAL: Next-State Logic
+    // 6. COMBINATIONAL: Next-State Logic
     // =========================================================================
 
     logic        fifo_wr_en   [KEEP_WIDTH];
@@ -303,7 +293,7 @@ module sample_poly_cbd #(
     end
 
     // =========================================================================
-    // 8. SEQUENTIAL: Register Update
+    // 7. SEQUENTIAL: Register Update
     // =========================================================================
 
     always_ff @(posedge clk or posedge rst) begin
