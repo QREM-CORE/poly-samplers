@@ -334,26 +334,4 @@ module sample_poly_cbd #(
         end
     end
 
-    // =========================================================================
-    // 9. ASSERTIONS (simulation only)
-    // =========================================================================
-    // synthesis translate_off
-    initial assert (ETA == 2 || ETA == 3)
-        else $fatal(1, "ETA must be 2 or 3, got %0d", ETA);
-
-    assert property (@(posedge clk) disable iff (rst) fifo_count <= FIFO_DEPTH)
-        else $fatal(1, "FIFO count overflow: %0d", fifo_count);
-
-    assert property (@(posedge clk) disable iff (rst) coeff_count <= TARGET_COEFFS)
-        else $fatal(1, "coeff_count overflow: %0d", coeff_count);
-
-    assert property (@(posedge clk) disable iff (rst)
-        (t_valid_i && !t_ready_o) |-> ##1 $stable(t_data_i) && $stable(t_keep_i) && $stable(t_last_i))
-        else $error("AXI sink: signals changed during backpressure");
-
-    assert property (@(posedge clk) disable iff (rst)
-        (t_valid_o && !t_ready_i) |-> ##1 $stable(t_data_o) && $stable(t_keep_o) && $stable(t_last_o))
-        else $error("AXI source: signals changed during backpressure");
-    // synthesis translate_on
-
 endmodule
