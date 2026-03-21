@@ -271,8 +271,8 @@ module sample_poly_cbd_tb;
         else begin
             cycle_cnt <= cycle_cnt + 1;
             if (cycle_cnt % 500 == 0)
-                $display("[DBG] cyc=%0d st=%0d fifo=%0d coeff=%0d oq0v=%0b oq1v=%0b rdy=%0b val=%0b done=%0b",
-                         cycle_cnt, dut.state, dut.fifo_count, dut.coeff_count, dut.oq_valid[0], dut.oq_valid[1], t_ready_i, t_valid_o, done);
+                $display("[DBG] cyc=%0d st=%0d wfifo=%0d coeff=%0d oq0v=%0b oq1v=%0b rdy=%0b val=%0b done=%0b",
+                         cycle_cnt, dut.state, dut.wfifo_count, dut.coeff_count, dut.oq_valid[0], dut.oq_valid[1], t_ready_i, t_valid_o, done);
         end
     end
 
