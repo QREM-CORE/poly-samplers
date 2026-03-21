@@ -61,10 +61,10 @@ module sample_poly_cbd #(
     output logic                     t_ready_o,
 
     // AXI4-Stream Source
-    output logic [47:0]              t_data_o, 
+    output logic [47:0]              t_data_o,
     output logic                     t_valid_o,
     output logic                     t_last_o,
-    output logic [5:0]               t_keep_o, 
+    output logic [5:0]               t_keep_o,
     input  wire                      t_ready_i
 );
 
@@ -73,7 +73,7 @@ module sample_poly_cbd #(
     // =========================================================================
     localparam int Q             = 3329;
     localparam int TARGET_COEFFS = 256;
-    localparam int CHUNK_BYTES   = ETA; 
+    localparam int CHUNK_BYTES   = ETA;
     localparam int WFIFO_DEPTH   = 4;
 
     typedef enum logic [1:0] {
@@ -128,7 +128,7 @@ module sample_poly_cbd #(
     logic             have_eta_bytes;
 
     always_comb begin
-        gbx_bit_ptr    = {1'b0, gbx_boff, 3'b000}; 
+        gbx_bit_ptr    = {1'b0, gbx_boff, 3'b000};
         eta_bytes      = {gbx_word1, gbx_word0}[gbx_bit_ptr +: 8*ETA];
         // Valid if word0 is valid AND (the chunk fits entirely in word0 OR word1 is also valid)
         have_eta_bytes = gbx_w0v && (({1'b0, gbx_boff} + 6'(CHUNK_BYTES)) <= 6'd32 || gbx_w1v);
@@ -236,7 +236,7 @@ module sample_poly_cbd #(
                 if (can_emit) begin
                     // Emit exactly 4 coefficients
                     coeff_count_nxt = coeff_count_nxt + 9'd4;
-                    
+
                     if (!oq_valid_nxt[0]) begin
                         oq_nxt[0].data  = {cbd_coeff[3], cbd_coeff[2], cbd_coeff[1], cbd_coeff[0]};
                         oq_nxt[0].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
@@ -304,9 +304,9 @@ module sample_poly_cbd #(
         end else begin
             state        <= state_nxt;
             done         <= done_nxt;
-            
+
             t_ready_o    <= (state_nxt == S_RUN) && (wfifo_count_nxt < 3'(WFIFO_DEPTH));
-            
+
             wfifo_wr_ptr <= wfifo_wr_ptr_nxt;
             wfifo_rd_ptr <= wfifo_rd_ptr_nxt;
             wfifo_count  <= wfifo_count_nxt;
