@@ -4,31 +4,29 @@
 // Standard    : FIPS 203 ML-KEM — verification of Algorithm 8 (SamplePolyCBD)
 //
 // Description :
-//   Self-checking testbench for sample_poly_cbd.
+//   Self-checking testbench for the unified sample_poly_cbd module.
 //
-//   1. Generates a deterministic pseudo-random byte stream (input stimulus).
-//   2. Runs the same CBD sampling algorithm in software to build a golden
-//      list of 256 expected 12-bit coefficients.
-//   3. Drives the byte stream into the DUT over an AXI4-Stream sink.
-//   4. Applies deterministic 3-of-4-cycle output backpressure (~25 % stall rate).
-//   5. Unpacks each 48-bit output beat into four 12-bit coefficients and
-//      compares lane-by-lane against the golden model.
-//   6. Checks t_last_o timing and t_keep_o correctness.
-//   7. Reports PASS / FAIL at the end.
+//   1. Dynamically tests both η=2 (ML-KEM-512) and η=3 (ML-KEM-768/1024).
+//   2. Generates a deterministic pseudo-random byte stream.
+//   3. Builds a software-based golden reference for the current η.
+//   4. Drives the AXI4-Stream sink and applies 75% output backpressure.
+//   5. Checks cycle-accurate handshakes and validates all 256 coefficients.
 // -----------------------------------------------------------------------------
 
 module sample_poly_cbd_tb;
 
     // =====================================================================
-    // Parameters
+    // Parameters & Variables
     // =====================================================================
 
-    localparam int ETA          = 2;              // CBD parameter η (change to 3 to test η=3)
     localparam int DWIDTH       = 256;            // Must match DUT
     localparam int KEEP_WIDTH   = DWIDTH / 8;     // 32 bytes per beat
     localparam int Q            = 3329;
     localparam int NUM_COEFFS   = 256;
-    localparam int INPUT_BYTES  = 64 * ETA;       // 128 for η=2, 192 for η=3
+
+    // Dynamically controlled by the test sequence
+    int unsigned current_eta;
+    logic        is_eta3;
 
     // =====================================================================
     // DUT signals
@@ -63,12 +61,9 @@ module sample_poly_cbd_tb;
     int unsigned               golden_coeffs  [$];     // Expected 12-bit values
     int unsigned               observed_count;
     int unsigned               error_count;
-    logic                      done_seen;     // Latched version of done pulse
+    logic                      done_seen;              // Latched done pulse
 
-    // =====================================================================
-    // Latch the one-cycle done pulse so the TB never misses it
-    // =====================================================================
-
+    // Latch the one-cycle done pulse
     always_ff @(posedge clk or posedge rst) begin
         if (rst)
             done_seen <= 1'b0;
@@ -81,13 +76,13 @@ module sample_poly_cbd_tb;
     // =====================================================================
 
     sample_poly_cbd #(
-        .ETA        (ETA),
         .DWIDTH     (DWIDTH),
         .KEEP_WIDTH (KEEP_WIDTH)
     ) dut (
         .clk        (clk),
         .rst        (rst),
         .start      (start),
+        .is_eta3    (is_eta3),   // <-- Runtime Control Signal
         .done       (done),
         .t_data_i   (t_data_i),
         .t_valid_i  (t_valid_i),
@@ -115,7 +110,8 @@ module sample_poly_cbd_tb;
     task automatic generate_stimulus();
         int unsigned seed = 32'hCBD0_2026;
         stimulus_bytes.delete();
-        for (int i = 0; i < INPUT_BYTES; i++) begin
+        // Generate enough bytes based on the CURRENT eta
+        for (int i = 0; i < (64 * current_eta); i++) begin
             stimulus_bytes.push_back($urandom(seed));
             seed += 32'h9E37;
         end
@@ -136,14 +132,14 @@ module sample_poly_cbd_tb;
             y_val = 0;
 
             // x ← Σ_{j=0}^{η-1} b[2ηi + j]
-            for (int j = 0; j < ETA; j++) begin
-                bit_idx = 2 * ETA * i + j;
+            for (int j = 0; j < current_eta; j++) begin
+                bit_idx = 2 * current_eta * i + j;
                 x_val += (stimulus_bytes[bit_idx / 8] >> (bit_idx % 8)) & 1;
             end
 
             // y ← Σ_{j=0}^{η-1} b[2ηi + η + j]
-            for (int j = 0; j < ETA; j++) begin
-                bit_idx = 2 * ETA * i + ETA + j;
+            for (int j = 0; j < current_eta; j++) begin
+                bit_idx = 2 * current_eta * i + current_eta + j;
                 y_val += (stimulus_bytes[bit_idx / 8] >> (bit_idx % 8)) & 1;
             end
 
@@ -169,7 +165,6 @@ module sample_poly_cbd_tb;
             beat_size = stimulus_bytes.size() - byte_idx;
             if (beat_size > KEEP_WIDTH) beat_size = KEEP_WIDTH;
 
-            // Present data at negedge — stable for DUT to sample at posedge.
             @(negedge clk);
             t_data_i = '0;
             t_keep_i = '0;
@@ -180,7 +175,6 @@ module sample_poly_cbd_tb;
             t_last_i  = ((byte_idx + beat_size) >= stimulus_bytes.size());
             t_valid_i = 1'b1;
 
-            // Wait until DUT accepts the beat or done fires.
             @(posedge clk);
             while (!t_ready_o && !done_seen) @(posedge clk);
             if (done_seen) break;
@@ -188,19 +182,13 @@ module sample_poly_cbd_tb;
             byte_idx += beat_size;
         end
 
-        // Park inputs low.
         @(negedge clk);
         t_valid_i = 1'b0;
-        t_last_i  = 1'b0;
-        t_keep_i  = '0;
-        t_data_i  = '0;
     endtask
 
     // =====================================================================
     // Output backpressure: ready 3 out of every 4 cycles (~75 %)
     // =====================================================================
-    // Uses a simple 2-bit counter instead of $urandom_range, which
-    // is unsupported in ModelSim ASE.
 
     logic [1:0] bp_cnt;
     always_ff @(posedge clk or posedge rst) begin
@@ -209,7 +197,7 @@ module sample_poly_cbd_tb;
             bp_cnt    <= 2'd0;
         end else begin
             bp_cnt    <= bp_cnt + 2'd1;
-            t_ready_i <= (bp_cnt != 2'd0);  // low 1-in-4 cycles
+            t_ready_i <= (bp_cnt != 2'd0);
         end
     end
 
@@ -223,14 +211,11 @@ module sample_poly_cbd_tb;
             error_count    <= 0;
         end else if (t_valid_o && t_ready_i) begin
 
-            // -- Check t_keep_o --
             if (t_keep_o != 6'h3F) begin
-                $display("ERROR [beat %0d]: t_keep_o = 0x%0h, expected 0x3F",
-                         observed_count / 4, t_keep_o);
+                $display("ERROR [beat %0d]: t_keep_o = 0x%0h, expected 0x3F", observed_count / 4, t_keep_o);
                 error_count <= error_count + 1;
             end
 
-            // -- Check t_last_o timing --
             if ((observed_count == NUM_COEFFS - 4) && !t_last_o) begin
                 $display("ERROR: t_last_o not asserted on final beat");
                 error_count <= error_count + 1;
@@ -240,7 +225,6 @@ module sample_poly_cbd_tb;
                 error_count <= error_count + 1;
             end
 
-            // -- Check each of the 4 coefficient lanes --
             for (int lane = 0; lane < 4; lane++) begin
                 automatic int unsigned got = t_data_o[12*lane +: 12];
                 automatic int unsigned idx = observed_count + lane;
@@ -248,26 +232,21 @@ module sample_poly_cbd_tb;
                     $display("ERROR: extra coefficient on lane %0d", lane);
                     error_count <= error_count + 1;
                 end else if (got !== golden_coeffs[idx][11:0]) begin
-                    $display("ERROR: Coeff[%0d] mismatch — got %0d, expected %0d",
-                             idx, got, golden_coeffs[idx]);
+                    $display("ERROR: Coeff[%0d] mismatch — got %0d, expected %0d", idx, got, golden_coeffs[idx]);
                     error_count <= error_count + 1;
                 end
             end
-
-            $display("[TB] Output beat %0d: coeffs %0d-%0d  t_last=%0b",
-                     observed_count / 4, observed_count, observed_count + 3, t_last_o);
             observed_count <= observed_count + 4;
         end
     end
 
     // =====================================================================
-    // Periodic debug: print DUT state every 500 cycles
+    // Periodic debug
     // =====================================================================
 
     int unsigned cycle_cnt;
     always_ff @(posedge clk or posedge rst) begin
-        if (rst)
-            cycle_cnt <= 0;
+        if (rst) cycle_cnt <= 0;
         else begin
             cycle_cnt <= cycle_cnt + 1;
             if (cycle_cnt % 500 == 0)
@@ -277,11 +256,32 @@ module sample_poly_cbd_tb;
     end
 
     // =====================================================================
-    // Main test sequence
+    // Main test sequence: Run BOTH Modes!
     // =====================================================================
 
     initial begin
-        // -- Initialise --
+        $display("==========================================================");
+        $display("Starting Unified sample_poly_cbd Testbench");
+        $display("==========================================================");
+
+        // Run Test 1: ML-KEM-512 Configuration
+        run_test_case(2);
+
+        // Run Test 2: ML-KEM-768/1024 Configuration
+        run_test_case(3);
+
+        $display("==========================================================");
+        $display("ALL TESTS PASSED: Both ETA=2 and ETA=3 modes verified!");
+        $display("==========================================================");
+        $finish;
+    end
+
+    // Reusable task to run the full simulation flow for a given ETA
+    task automatic run_test_case(int eta_val);
+        current_eta = eta_val;
+        is_eta3     = (eta_val == 3) ? 1'b1 : 1'b0;
+
+        // -- Initialize & Reset --
         rst       = 1'b1;
         start     = 1'b0;
         t_data_i  = '0;
@@ -291,20 +291,22 @@ module sample_poly_cbd_tb;
 
         generate_stimulus();
         build_golden_model();
-        $display("[TB] Golden model built: %0d coefficients from %0d bytes (ETA=%0d).",
-                 golden_coeffs.size(), stimulus_bytes.size(), ETA);
+
+        $display("\n[TB] -----------------------------------------------------");
+        $display("[TB] Testing ETA=%0d. Golden model: %0d coeffs from %0d bytes.",
+                 current_eta, golden_coeffs.size(), stimulus_bytes.size());
 
         // -- Release reset --
         repeat (5) @(posedge clk);
         rst = 1'b0;
 
-        // -- Pulse start (at negedge so DUT samples cleanly at posedge) --
+        // -- Pulse start --
         @(negedge clk);
         start = 1'b1;
         @(negedge clk);
         start = 1'b0;
 
-        // -- Drive input, then wait for done — watchdog covers both --
+        // -- Drive input and wait --
         fork
             begin
                 drive_axi_sink();
@@ -319,17 +321,14 @@ module sample_poly_cbd_tb;
 
         @(posedge clk);
 
-        // -- Final verdict --
+        // -- Evaluate --
         if (observed_count != NUM_COEFFS)
-            $fatal(1, "FAIL: observed %0d coefficients, expected %0d",
-                   observed_count, NUM_COEFFS);
+            $fatal(1, "FAIL ETA=%0d: observed %0d coefficients, expected %0d", current_eta, observed_count, NUM_COEFFS);
 
         if (error_count != 0)
-            $fatal(1, "FAIL: %0d mismatches detected", error_count);
+            $fatal(1, "FAIL ETA=%0d: %0d mismatches detected", current_eta, error_count);
 
-        $display("PASS: sample_poly_cbd (ETA=%0d) produced %0d coefficients matching the golden model.",
-                 ETA, NUM_COEFFS);
-        $finish;
-    end
+        $display("[TB] PASS: sample_poly_cbd perfectly matched golden model for ETA=%0d.", current_eta);
+    endtask
 
 endmodule

@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------------
-// Author      : Salwan Aldhahab
+// Author      : Salwan Aldhahab, Kiet Le
 // Module      : sample_ntt
 // Standard    : FIPS 203 ML-KEM — Algorithm 7 (SampleNTT)
 //
