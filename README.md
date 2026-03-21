@@ -3,6 +3,7 @@
 [![Standard: FIPS 203](https://img.shields.io/badge/Standard-FIPS%20203-red.svg)](https://csrc.nist.gov/pubs/fips/203/ipd)
 [![Language: SystemVerilog](https://img.shields.io/badge/Language-SystemVerilog-blue.svg)](https://ieeexplore.ieee.org/document/8299595)
 [![Target: FPGA / ASIC](https://img.shields.io/badge/Target-FPGA%20%2F%20ASIC-lightgrey.svg)]()
+[![Verified with: ModelSim / Questa](https://img.shields.io/badge/Verified%20with-ModelSim%20%2F%20Questa-green.svg)](https://eda.sw.siemens.com/en-US/ic/questasim/)
 [![Verified with: Verilator](https://img.shields.io/badge/Verified%20with-Verilator-orange.svg)](https://www.veripool.org/verilator/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
