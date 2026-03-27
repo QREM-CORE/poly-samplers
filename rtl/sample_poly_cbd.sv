@@ -65,7 +65,6 @@ module sample_poly_cbd #(
     // Control
     input  wire                      start,
     input  wire                      is_eta3,  // 1 = ML-KEM-768/1024 (η=3), 0 = ML-KEM-512 (η=2)
-    output logic                     done,
 
     // AXI4-Stream Sink
     input  wire  [DWIDTH-1:0]        t_data_i,
@@ -90,7 +89,7 @@ module sample_poly_cbd #(
     localparam int WFIFO_DEPTH   = 4;
 
     typedef enum logic [1:0] {
-        S_IDLE, S_RUN, S_DONE
+        S_IDLE, S_RUN
     } state_t;
 
     typedef struct packed {
@@ -198,7 +197,6 @@ module sample_poly_cbd #(
     // 6. COMBINATIONAL: Next-State Logic
     // =========================================================================
     state_t              state_nxt;
-    logic                done_nxt;
     logic [1:0]          wfifo_wr_ptr_nxt;
     logic [1:0]          wfifo_rd_ptr_nxt;
     logic [2:0]          wfifo_count_nxt;
@@ -215,7 +213,6 @@ module sample_poly_cbd #(
 
     always_comb begin
         state_nxt        = state;
-        done_nxt         = 1'b0;
         wfifo_wr_ptr_nxt = wfifo_wr_ptr;
         wfifo_rd_ptr_nxt = wfifo_rd_ptr;
         wfifo_count_nxt  = wfifo_count;
@@ -306,13 +303,8 @@ module sample_poly_cbd #(
 
                 // Step F: Completion Check
                 if ((coeff_count_nxt >= 9'(TARGET_COEFFS)) && !oq_valid_nxt[0] && !oq_valid_nxt[1]) begin
-                    state_nxt = S_DONE;
+                    state_nxt = S_IDLE;
                 end
-            end
-
-            S_DONE: begin
-                done_nxt  = 1'b1;
-                state_nxt = S_IDLE;
             end
         endcase
     end
@@ -323,7 +315,6 @@ module sample_poly_cbd #(
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
             state        <= S_IDLE;
-            done         <= 1'b0;
             t_ready_o    <= 1'b0;
             wfifo_wr_ptr <= 2'd0;
             wfifo_rd_ptr <= 2'd0;
@@ -336,7 +327,6 @@ module sample_poly_cbd #(
             coeff_count  <= 9'd0;
         end else begin
             state        <= state_nxt;
-            done         <= done_nxt;
 
             t_ready_o    <= (state_nxt == S_RUN) && (wfifo_count_nxt < 3'(WFIFO_DEPTH));
 

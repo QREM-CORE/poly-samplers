@@ -38,7 +38,6 @@ module sample_ntt_tb;
 
     // Control
     logic                      start;
-    logic                      done;
 
     // AXI4-Stream Sink (to DUT)
     logic [DWIDTH-1:0]         t_data_i;
@@ -62,17 +61,17 @@ module sample_ntt_tb;
     int unsigned               golden_coeffs  [$];     // Expected 12-bit values
     int unsigned               observed_count;
     int unsigned               error_count;
-    logic                      done_seen;     // Latched version of done pulse
+    logic                      last_seen;     // Latched version of final transfer
 
     // =====================================================================
-    // Latch the one-cycle done pulse so the TB never misses it
+    // Latch the final handshake so the TB knows when to stop
     // =====================================================================
 
     always_ff @(posedge clk or posedge rst) begin
         if (rst)
-            done_seen <= 1'b0;
-        else if (done)
-            done_seen <= 1'b1;
+            last_seen <= 1'b0;
+        else if (t_valid_o && t_ready_i && t_last_o)
+            last_seen <= 1'b1;
     end
 
     // =====================================================================
@@ -86,7 +85,6 @@ module sample_ntt_tb;
         .clk        (clk),
         .rst        (rst),
         .start      (start),
-        .done       (done),
         .t_data_i   (t_data_i),
         .t_valid_i  (t_valid_i),
         .t_last_i   (t_last_i),
@@ -152,7 +150,7 @@ module sample_ntt_tb;
         int byte_idx  = 0;
         int beat_size;
 
-        while ((byte_idx < stimulus_bytes.size()) && !done_seen) begin
+        while ((byte_idx < stimulus_bytes.size()) && !last_seen) begin
             beat_size = stimulus_bytes.size() - byte_idx;
             if (beat_size > KEEP_WIDTH) beat_size = KEEP_WIDTH;
 
@@ -167,10 +165,10 @@ module sample_ntt_tb;
             t_last_i  = ((byte_idx + beat_size) >= stimulus_bytes.size());
             t_valid_i = 1'b1;
 
-            // Wait until DUT accepts the beat or done fires.
+            // Wait until DUT accepts the beat or test finishes.
             @(posedge clk);
-            while (!t_ready_o && !done_seen) @(posedge clk);
-            if (done_seen) break;
+            while (!t_ready_o && !last_seen) @(posedge clk);
+            if (last_seen) break;
 
             byte_idx += beat_size;
         end
@@ -255,8 +253,8 @@ module sample_ntt_tb;
         else begin
             cycle_cnt <= cycle_cnt + 1;
             if (cycle_cnt % 500 == 0)
-                $display("[DBG] cyc=%0d st=%0d wfifo=%0d coeff=%0d oq0v=%0b oq1v=%0b agg=%0d rdy=%0b val=%0b done=%0b",
-                         cycle_cnt, dut.state, dut.wfifo_count, dut.coeff_count, dut.oq_valid[0], dut.oq_valid[1], dut.agg_count, t_ready_i, t_valid_o, done);
+                $display("[DBG] cyc=%0d st=%0d wfifo=%0d coeff=%0d oq0v=%0b oq1v=%0b agg=%0d rdy=%0b val=%0b last=%0b",
+                         cycle_cnt, dut.state, dut.wfifo_count, dut.coeff_count, dut.oq_valid[0], dut.oq_valid[1], dut.agg_count, t_ready_i, t_valid_o, last_seen);
         end
     end
 
@@ -288,15 +286,15 @@ module sample_ntt_tb;
         @(negedge clk);
         start = 1'b0;
 
-        // -- Drive input, then wait for done — watchdog covers both --
+        // -- Drive input, then wait for completion — watchdog covers both --
         fork
             begin
                 drive_axi_sink();
-                wait (done_seen == 1'b1);
+                wait (last_seen == 1'b1);
             end
             begin : watchdog
                 repeat (50_000) @(posedge clk);
-                $fatal(1, "TIMEOUT: DUT did not assert done within 50 000 cycles");
+                $fatal(1, "TIMEOUT: DUT did not assert t_last_o within 50 000 cycles");
             end
         join_any
         disable fork;
