@@ -19,44 +19,36 @@
 //   Input byte count: 64·η  (128 for η=2, 192 for η=3).
 //   Output: 64 beats of 4 × 12-bit packed coefficients (256 total).
 //
-// Micro-architecture (revised):
+// Micro-architecture:
 //
-//   ┌───────────┐   AXI-S sink   ┌────────────┐  256-bit words  ┌──────────┐
-//   │  Keccak   │──────────────▸ │ Wide FIFO  │───────────────▸ │ Gearbox  │
-//   │  (SHAKE)  │  256b beats    │ 4 entries  │  1 read/cycle   │ 24b/cycle│
-//   └───────────┘  1 write/beat  └────────────┘                 └────┬─────┘
-//                                                                    │ 24 bits (max 3 bytes)
-//                                                              ┌─────▼─────┐
-//                                                              │  Dynamic  │
-//                                                              │  Mux &    │
-//                                                              │  Popcount │
-//                                                              └─────┬─────┘
-//                                                                    │ 4 coeffs/cycle
-//                                      AXI-S source            ┌─────▼─────┐
-//                                ◂──────────────────────────── │ 4-coeff   │
+//   ┌───────────┐   AXI-S sink   ┌────────────┐  24 bits/cycle  ┌───────────┐
+//   │  Keccak   │──────────────▸ │  Gearbox   │───────────────▸ │  Dynamic  │
+//   │  (SHAKE)  │   64b beats    │ 128b dbl-  │  part-select    │  Mux &    │
+//   └───────────┘  direct load   │  buffer    │                 │  Popcount │
+//                                └────────────┘                 └─────┬─────┘
+//                                                                     │ 4 coeffs/cycle
+//                                      AXI-S source             ┌─────▼─────┐
+//                                ◂──────────────────────────── │ 2-entry   │
 //                                  48-bit beats                │ Skid Buf  │
 //                                                              └───────────┘
 //
-//   • Wide FIFO    – 4 × 256-bit word entries.  Each AXI beat is stored with a
-//                    single DWIDTH-bit write (one write port, BRAM-friendly).
-//   • Gearbox      – double-buffer (word0 + word1).  Reads a fixed 24-bit
-//                    window per cycle via a variable part-select; handles
-//                    cross-word-boundary spans transparently.
+//   • Gearbox      – 128-bit double-buffer (word0 + word1).  AXI beats load
+//                    directly into free slots — no intermediate FIFO.  Reads
+//                    a fixed 24-bit window per cycle via variable part-select;
+//                    handles cross-word-boundary spans transparently.
 //   • Dynamic Mux  – routes exactly 16 bits (η=2) or 24 bits (η=3) from the
 //     & Popcount     gearbox into a unified 3-bit popcount and modulo logic.
 //                    Produces exactly 4 coefficients per cycle.
 //   • Skid buffer  – 2-entry output queue absorbs downstream back-pressure.
 //
 // Handshake notes:
-//   • t_ready_o is registered — one-cycle latency between an internal count
+//   • t_ready_o is registered — one-cycle latency between an internal state
 //     change and the upstream source seeing back-pressure.
 //   • t_last_o marks the final (64th) output beat (coefficients 253-256).
-//   • done pulses high for one cycle after all 256 coefficients are delivered,
-//     the output queue is drained, and the pipeline is empty.
 // -----------------------------------------------------------------------------
 
 module sample_poly_cbd #(
-    parameter int DWIDTH     = 256,            // Input AXI beat width (bits)
+    parameter int DWIDTH     = 64,             // Input AXI beat width (bits)
     parameter int KEEP_WIDTH = DWIDTH / 8      // Byte-enable width
 ) (
     input  wire                      clk,
@@ -86,7 +78,6 @@ module sample_poly_cbd #(
     // =========================================================================
     localparam int Q             = 3329;
     localparam int TARGET_COEFFS = 256;
-    localparam int WFIFO_DEPTH   = 4;
 
     typedef enum logic [1:0] {
         S_IDLE, S_RUN
@@ -102,18 +93,12 @@ module sample_poly_cbd #(
     // =========================================================================
     state_t state;
 
-    // Wide word FIFO
-    logic [DWIDTH-1:0]  wfifo [WFIFO_DEPTH];
-    logic [1:0]         wfifo_wr_ptr;
-    logic [1:0]         wfifo_rd_ptr;
-    logic [2:0]         wfifo_count;
-
-    // Gearbox double-buffer
+    // Gearbox double-buffer (direct AXI feed — no FIFO)
     logic [DWIDTH-1:0]  gbx_word0;
     logic [DWIDTH-1:0]  gbx_word1;
     logic               gbx_w0v;
     logic               gbx_w1v;
-    logic [4:0]         gbx_boff;
+    logic [2:0]         gbx_boff;    // Byte offset within word0 (0 .. 7)
 
     // 2-entry output skid buffer
     beat_t              oq      [2];
@@ -135,19 +120,19 @@ module sample_poly_cbd #(
     // =========================================================================
     // 4. COMBINATIONAL: Gearbox Dynamic Read Window
     // =========================================================================
-    logic [8:0]  gbx_bit_ptr;
+    logic [6:0]  gbx_bit_ptr;
     logic [23:0] raw_chunk; // Always extract 24 bits (3 bytes max)
     logic        have_chunk;
     logic [2:0]  chunk_size; // Dynamically 2 or 3
 
     always_comb begin
         chunk_size  = is_eta3 ? 3'd3 : 3'd2;
-        gbx_bit_ptr = {1'b0, gbx_boff, 3'b000};
+        gbx_bit_ptr = {1'b0, gbx_boff, 3'b000};           // gbx_boff * 8 (7 bits)
 
         // Extract maximum possible chunk to avoid variable width slicing
         raw_chunk   = {gbx_word1, gbx_word0}[gbx_bit_ptr +: 24];
 
-        have_chunk  = gbx_w0v && (({1'b0, gbx_boff} + 6'(chunk_size)) <= 6'd32 || gbx_w1v);
+        have_chunk  = gbx_w0v && (({1'b0, gbx_boff} + 4'(chunk_size)) <= 4'd8 || gbx_w1v);
     end
 
     // =========================================================================
@@ -197,25 +182,19 @@ module sample_poly_cbd #(
     // 6. COMBINATIONAL: Next-State Logic
     // =========================================================================
     state_t              state_nxt;
-    logic [1:0]          wfifo_wr_ptr_nxt;
-    logic [1:0]          wfifo_rd_ptr_nxt;
-    logic [2:0]          wfifo_count_nxt;
     logic [DWIDTH-1:0]   gbx_word0_nxt, gbx_word1_nxt;
     logic                gbx_w0v_nxt, gbx_w1v_nxt;
-    logic [4:0]          gbx_boff_nxt;
+    logic [2:0]          gbx_boff_nxt;
     beat_t               oq_nxt  [2];
     logic                oq_valid_nxt [2];
     logic [8:0]          coeff_count_nxt;
 
-    logic [5:0]          boff_plus_chunk;
+    logic [3:0]          boff_plus_chunk;
     logic                can_emit;
     logic                oq_full;
 
     always_comb begin
         state_nxt        = state;
-        wfifo_wr_ptr_nxt = wfifo_wr_ptr;
-        wfifo_rd_ptr_nxt = wfifo_rd_ptr;
-        wfifo_count_nxt  = wfifo_count;
         gbx_word0_nxt    = gbx_word0;
         gbx_word1_nxt    = gbx_word1;
         gbx_w0v_nxt      = gbx_w0v;
@@ -227,18 +206,15 @@ module sample_poly_cbd #(
         oq_valid_nxt[1]  = oq_valid[1];
         coeff_count_nxt  = coeff_count;
 
-        boff_plus_chunk  = 6'd0;
+        boff_plus_chunk  = 4'd0;
 
         case (state)
             S_IDLE: begin
                 if (start) begin
                     state_nxt        = S_RUN;
-                    wfifo_wr_ptr_nxt = 2'd0;
-                    wfifo_rd_ptr_nxt = 2'd0;
-                    wfifo_count_nxt  = 3'd0;
                     gbx_w0v_nxt      = 1'b0;
                     gbx_w1v_nxt      = 1'b0;
-                    gbx_boff_nxt     = 5'd0;
+                    gbx_boff_nxt     = 3'd0;
                     oq_nxt[0]        = '0; oq_nxt[1] = '0;
                     oq_valid_nxt[0]  = 1'b0; oq_valid_nxt[1] = 1'b0;
                     coeff_count_nxt  = 9'd0;
@@ -253,13 +229,7 @@ module sample_poly_cbd #(
                     oq_valid_nxt[1] = 1'b0;
                 end
 
-                // Step B: FIFO Enqueue
-                if (t_valid_i && t_ready_o) begin
-                    wfifo_wr_ptr_nxt = wfifo_wr_ptr_nxt + 2'd1;
-                    wfifo_count_nxt  = wfifo_count_nxt  + 3'd1;
-                end
-
-                // Step C & D: CBD Sampling, Packing, and Gearbox Advance
+                // Step B: CBD Sampling, Packing, and Gearbox Advance
                 oq_full  = oq_valid_nxt[0] && oq_valid_nxt[1];
                 can_emit = have_chunk && !oq_full && (coeff_count_nxt < 9'(TARGET_COEFFS));
 
@@ -278,34 +248,37 @@ module sample_poly_cbd #(
                     end
 
                     // Advance gearbox dynamically by 2 or 3 bytes
-                    boff_plus_chunk = {1'b0, gbx_boff} + 6'(chunk_size);
-                    gbx_boff_nxt    = boff_plus_chunk[4:0];
+                    boff_plus_chunk = {1'b0, gbx_boff} + 4'(chunk_size);
+                    gbx_boff_nxt    = boff_plus_chunk[2:0];
 
-                    if (boff_plus_chunk >= 6'd32) begin
+                    if (boff_plus_chunk >= 4'd8) begin
                         gbx_word0_nxt = gbx_word1_nxt;
                         gbx_w0v_nxt   = gbx_w1v_nxt;
                         gbx_w1v_nxt   = 1'b0;
                     end
                 end
 
-                // Step E: Gearbox Refill from FIFO
-                if (!gbx_w0v_nxt && wfifo_count > 3'd0) begin
-                    gbx_word0_nxt    = wfifo[wfifo_rd_ptr];
-                    gbx_w0v_nxt      = 1'b1;
-                    wfifo_rd_ptr_nxt = wfifo_rd_ptr_nxt + 2'd1;
-                    wfifo_count_nxt  = wfifo_count_nxt  - 3'd1;
-                end else if (gbx_w0v_nxt && !gbx_w1v_nxt && wfifo_count > 3'd0) begin
-                    gbx_word1_nxt    = wfifo[wfifo_rd_ptr];
-                    gbx_w1v_nxt      = 1'b1;
-                    wfifo_rd_ptr_nxt = wfifo_rd_ptr_nxt + 2'd1;
-                    wfifo_count_nxt  = wfifo_count_nxt  - 3'd1;
+                // Step C: Gearbox direct load from AXI input
+                //   Runs after Step B so that a word-boundary shift (which
+                //   frees the word1 slot) is visible and can be immediately
+                //   re-filled in the same cycle.
+                if (t_valid_i && t_ready_o) begin
+                    if (!gbx_w0v_nxt) begin
+                        gbx_word0_nxt = t_data_i;
+                        gbx_w0v_nxt   = 1'b1;
+                    end else if (!gbx_w1v_nxt) begin
+                        gbx_word1_nxt = t_data_i;
+                        gbx_w1v_nxt   = 1'b1;
+                    end
                 end
 
-                // Step F: Completion Check
+                // Step D: Completion Check
                 if ((coeff_count_nxt >= 9'(TARGET_COEFFS)) && !oq_valid_nxt[0] && !oq_valid_nxt[1]) begin
                     state_nxt = S_IDLE;
                 end
             end
+
+            default: state_nxt = S_IDLE;
         endcase
     end
 
@@ -316,23 +289,21 @@ module sample_poly_cbd #(
         if (rst) begin
             state        <= S_IDLE;
             t_ready_o    <= 1'b0;
-            wfifo_wr_ptr <= 2'd0;
-            wfifo_rd_ptr <= 2'd0;
-            wfifo_count  <= 3'd0;
             gbx_w0v      <= 1'b0;
             gbx_w1v      <= 1'b0;
-            gbx_boff     <= 5'd0;
+            gbx_boff     <= 3'd0;
             oq[0]        <= '0; oq[1] <= '0;
             oq_valid[0]  <= 1'b0; oq_valid[1] <= 1'b0;
             coeff_count  <= 9'd0;
         end else begin
             state        <= state_nxt;
 
-            t_ready_o    <= (state_nxt == S_RUN) && (wfifo_count_nxt < 3'(WFIFO_DEPTH));
+            // Registered ready: assert when at least one gearbox slot will
+            // be free next cycle.  No FIFO — AXI beats feed the gearbox
+            // directly, so ready depends only on gearbox slot availability.
+            t_ready_o    <= (state_nxt == S_RUN)
+                         && (!gbx_w0v_nxt || !gbx_w1v_nxt);
 
-            wfifo_wr_ptr <= wfifo_wr_ptr_nxt;
-            wfifo_rd_ptr <= wfifo_rd_ptr_nxt;
-            wfifo_count  <= wfifo_count_nxt;
             gbx_word0    <= gbx_word0_nxt;
             gbx_word1    <= gbx_word1_nxt;
             gbx_w0v      <= gbx_w0v_nxt;
@@ -341,10 +312,6 @@ module sample_poly_cbd #(
             oq[0]        <= oq_nxt[0]; oq[1] <= oq_nxt[1];
             oq_valid[0]  <= oq_valid_nxt[0]; oq_valid[1] <= oq_valid_nxt[1];
             coeff_count  <= coeff_count_nxt;
-
-            if (t_valid_i && t_ready_o) begin
-                wfifo[wfifo_wr_ptr] <= t_data_i;
-            end
         end
     end
 

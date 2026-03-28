@@ -23,8 +23,8 @@ module sample_ntt_tb;
     // Parameters
     // =====================================================================
 
-    localparam int DWIDTH      = 256;           // Must match DUT
-    localparam int KEEP_WIDTH  = DWIDTH / 8;    // 32 bytes per beat
+    localparam int DWIDTH      = 64;            // Must match DUT
+    localparam int KEEP_WIDTH  = DWIDTH / 8;    // 8 bytes per beat
     localparam int Q           = 3329;
     localparam int NUM_COEFFS  = 256;
     localparam int NUM_BYTES   = 1024;          // Enough to guarantee 256 accepted
@@ -293,7 +293,7 @@ module sample_ntt_tb;
                 wait (last_seen == 1'b1);
             end
             begin : watchdog
-                repeat (50_000) @(posedge clk);
+                for (int _wd = 0; _wd < 50_000; _wd++) @(posedge clk);
                 $fatal(1, "TIMEOUT: DUT did not assert t_last_o within 50 000 cycles");
             end
         join_any
