@@ -81,7 +81,6 @@ module sample_ntt #(
 
     // Control
     input  wire                      start,   // Pulse to begin sampling
-    output logic                     done,    // Pulse when 256 coefficients delivered
 
     // AXI4-Stream Sink (from Keccak / SHAKE source)
     input  wire  [DWIDTH-1:0]        t_data_i,
@@ -108,8 +107,7 @@ module sample_ntt #(
 
     typedef enum logic [1:0] {
         S_IDLE,
-        S_RUN,
-        S_DONE
+        S_RUN
     } state_t;
 
     // One entry in the 2-deep output skid buffer.
@@ -260,7 +258,6 @@ module sample_ntt #(
 
     // -- Next-state wires --
     state_t      state_nxt;
-    logic        done_nxt;
     logic [1:0]  wfifo_wr_ptr_nxt;
     logic [1:0]  wfifo_rd_ptr_nxt;
     logic [2:0]  wfifo_count_nxt;
@@ -285,7 +282,6 @@ module sample_ntt #(
 
         // ── Defaults: hold registered values ─────────────────────────────
         state_nxt        = state;
-        done_nxt         = 1'b0;
         wfifo_wr_ptr_nxt = wfifo_wr_ptr;
         wfifo_rd_ptr_nxt = wfifo_rd_ptr;
         wfifo_count_nxt  = wfifo_count;
@@ -522,25 +518,17 @@ module sample_ntt #(
                 end
 
                 // ── Step F: Completion check ──────────────────────────────
-                //    Transition to S_DONE once all coefficients have been
+                //    Transition to S_IDLE once all coefficients have been
                 //    counted AND the entire pipeline (Stage 1 + aggregator +
                 //    output queue) is fully drained.
                 if ((coeff_count_nxt >= 9'(TARGET_COEFFS))
                     && !oq_valid_nxt[0] && !oq_valid_nxt[1]
                     && (agg_count_nxt == 3'd0)
                     && !s1_valid_nxt) begin
-                    state_nxt = S_DONE;
+                    state_nxt = S_IDLE;
                 end
 
             end // S_RUN
-
-            // -----------------------------------------------------------------
-            // DONE — one-cycle done pulse, then back to IDLE.
-            // -----------------------------------------------------------------
-            S_DONE: begin
-                done_nxt  = 1'b1;
-                state_nxt = S_IDLE;
-            end
 
             default: state_nxt = S_IDLE;
         endcase
@@ -560,7 +548,6 @@ module sample_ntt #(
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
             state        <= S_IDLE;
-            done         <= 1'b0;
             t_ready_o    <= 1'b0;
             wfifo_wr_ptr <= 2'd0;
             wfifo_rd_ptr <= 2'd0;
@@ -579,7 +566,6 @@ module sample_ntt #(
             coeff_count  <= 9'd0;
         end else begin
             state        <= state_nxt;
-            done         <= done_nxt;
 
             // Registered ready: assert when the FIFO will have room next cycle.
             // This decouples t_ready_o from the combinational path driven by
