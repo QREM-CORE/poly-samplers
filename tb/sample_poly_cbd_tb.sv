@@ -19,8 +19,8 @@ module sample_poly_cbd_tb;
     // Parameters & Variables
     // =====================================================================
 
-    localparam int DWIDTH       = 256;            // Must match DUT
-    localparam int KEEP_WIDTH   = DWIDTH / 8;     // 32 bytes per beat
+    localparam int DWIDTH       = 64;             // Must match DUT
+    localparam int KEEP_WIDTH   = DWIDTH / 8;     // 8 bytes per beat
     localparam int Q            = 3329;
     localparam int NUM_COEFFS   = 256;
 
@@ -248,8 +248,8 @@ module sample_poly_cbd_tb;
         else begin
             cycle_cnt <= cycle_cnt + 1;
             if (cycle_cnt % 500 == 0)
-                $display("[DBG] cyc=%0d st=%0d wfifo=%0d coeff=%0d oq0v=%0b oq1v=%0b rdy=%0b val=%0b last=%0b",
-                         cycle_cnt, dut.state, dut.wfifo_count, dut.coeff_count, dut.oq_valid[0], dut.oq_valid[1], t_ready_i, t_valid_o, last_seen);
+                $display("[DBG] cyc=%0d st=%0d coeff=%0d oq0v=%0b oq1v=%0b gbx0v=%0b gbx1v=%0b rdy=%0b val=%0b last=%0b",
+                         cycle_cnt, dut.state, dut.coeff_count, dut.oq_valid[0], dut.oq_valid[1], dut.gbx_w0v, dut.gbx_w1v, t_ready_i, t_valid_o, last_seen);
         end
     end
 
@@ -311,7 +311,7 @@ module sample_poly_cbd_tb;
                 wait (last_seen == 1'b1);
             end
             begin : watchdog
-                repeat (50_000) @(posedge clk);
+                for (int _wd = 0; _wd < 50_000; _wd++) @(posedge clk);
                 $fatal(1, "TIMEOUT: DUT did not complete within 50 000 cycles");
             end
         join_any

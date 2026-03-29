@@ -19,9 +19,9 @@
 //
 // Micro-architecture (revised):
 //
-//   ┌───────────┐   AXI-S sink   ┌────────────┐  256-bit words  ┌──────────┐
-//   │  Keccak   │──────────────▸ │ Wide FIFO  │───────────────▸ │ Gearbox  │
-//   │  (SHAKE)  │  256b beats    │ 4 entries  │  1 read/cycle   │ 6B/cycle │
+//   ┌───────────┐   AXI-S sink   ┌────────────┐   64-bit words  ┌──────────┐
+//   │  Keccak   │──────────────▸ │    FIFO    │───────────────▸ │ Gearbox  │
+//   │  (SHAKE)  │   64b beats    │  4 entries  │  1 read/cycle   │ 6B/cycle │
 //   └───────────┘  1 write/beat  └────────────┘                 └────┬─────┘
 //                                                                     │ 6 bytes (2 triples)
 //                                                              ┌──────▼──────┐
@@ -41,11 +41,11 @@
 //                                  48-bit beats               │ Skid Buf    │
 //                                                              └─────────────┘
 //
-//   • Wide FIFO    – 4 × 256-bit word entries.  Each AXI beat is stored with a
-//                    single DWIDTH-bit write (one write port, BRAM-friendly).
-//   • Gearbox      – double-buffer (word0 + word1).  Reads exactly 6 bytes per
-//                    cycle via a variable part-select shift-MUX; handles cross-
-//                    word-boundary spans transparently.
+//   • FIFO         – 4 × 64-bit word entries.  Each AXI beat is stored with a
+//                    single DWIDTH-bit write (one write port).
+//   • Gearbox      – 128-bit double-buffer (word0 + word1).  Reads exactly
+//                    6 bytes per cycle via a variable part-select shift-MUX;
+//                    handles cross-word-boundary spans transparently.
 //   • Stage 0      – two triples evaluated in parallel (purely combinational).
 //   • Stage 1      – pipeline register latching Stage 0 comparator outputs,
 //                    breaking the deep combinational path before the aggregator.
@@ -73,7 +73,7 @@
 // -----------------------------------------------------------------------------
 
 module sample_ntt #(
-    parameter int DWIDTH     = 256,          // Input AXI beat width (bits)
+    parameter int DWIDTH     = 64,           // Input AXI beat width (bits)
     parameter int KEEP_WIDTH = DWIDTH / 8    // Byte-enable width
 ) (
     input  wire                      clk,
@@ -123,22 +123,22 @@ module sample_ntt #(
     // -- FSM --
     state_t state;
 
-    // -- Wide word FIFO (single write port per AXI beat) --
-    // Each AXI beat is written as one 256-bit word — exactly one write port,
-    // which allows BRAM inference and avoids a 32-entry LUT crossbar.
+    // -- Word FIFO (single write port per AXI beat) --
+    // Each AXI beat is written as one DWIDTH-bit word — exactly one write
+    // port.
     logic [DWIDTH-1:0]  wfifo [WFIFO_DEPTH];
     logic [1:0]         wfifo_wr_ptr;
     logic [1:0]         wfifo_rd_ptr;
     logic [2:0]         wfifo_count;   // 0 .. 4
 
     // -- Gearbox double-buffer --
-    // Holds at most two 256-bit words so that a 6-byte read can span a word
-    // boundary without stalling.  A variable part-select extracts the window.
+    // Holds at most two DWIDTH-bit words so that a 6-byte read can span a
+    // word boundary without stalling.  A variable part-select extracts the window.
     logic [DWIDTH-1:0]  gbx_word0;     // Word being consumed
     logic [DWIDTH-1:0]  gbx_word1;     // Pre-fetched next word
     logic               gbx_w0v;       // word0 is valid
     logic               gbx_w1v;       // word1 is valid
-    logic [4:0]         gbx_boff;      // Byte offset within word0 (0 .. 31)
+    logic [2:0]         gbx_boff;      // Byte offset within word0 (0 .. 7)
 
     // -- Pipeline Stage 1 (registered comparator outputs) --
     // Latches the 4 candidate values and their validity flags from Stage 0.
@@ -172,23 +172,22 @@ module sample_ntt #(
     // =========================================================================
     // 4. COMBINATIONAL: Gearbox 6-byte read window
     // =========================================================================
-    //    The double-buffer is viewed as a contiguous 512-bit word:
+    //    The double-buffer is viewed as a contiguous 128-bit word:
     //      {gbx_word1, gbx_word0}.
     //    A variable part-select (fixed width, variable start) extracts the
-    //    current 6-byte window.  This synthesises as a shift-MUX tree, NOT as
-    //    a multi-ported RAM — no BRAM inference issues.
+    //    current 6-byte window.  This synthesises as a shift-MUX tree.
     //    The read is valid only when word0 is loaded AND the 6 bytes either
-    //    lie entirely in word0 (boff + 6 <= 32) or word1 is also loaded.
+    //    lie entirely in word0 (boff + 6 <= 8) or word1 is also loaded.
 
-    logic [8:0]  gbx_bit_ptr;   // gbx_boff × 8 — start bit of the window
+    logic [6:0]  gbx_bit_ptr;   // gbx_boff × 8 — start bit of the window
     logic [47:0] six_bytes;     // 6-byte window extracted from the double-buffer
     logic        have_6bytes;   // Gearbox can serve a complete 6-byte window
 
     always_comb begin
-        gbx_bit_ptr = {1'b0, gbx_boff, 3'b000};             // gbx_boff * 8 (9 bits)
+        gbx_bit_ptr = {1'b0, gbx_boff, 3'b000};              // gbx_boff * 8 (7 bits)
         six_bytes   = {gbx_word1, gbx_word0}[gbx_bit_ptr +: 48];
         have_6bytes = gbx_w0v
-                    && (({1'b0, gbx_boff} + 6'd6) <= 6'd32 || gbx_w1v);
+                    && (({1'b0, gbx_boff} + 4'd6) <= 4'd8 || gbx_w1v);
     end
 
     // =========================================================================
@@ -263,7 +262,7 @@ module sample_ntt #(
     logic [2:0]  wfifo_count_nxt;
     logic [DWIDTH-1:0] gbx_word0_nxt, gbx_word1_nxt;
     logic        gbx_w0v_nxt, gbx_w1v_nxt;
-    logic [4:0]  gbx_boff_nxt;
+    logic [2:0]  gbx_boff_nxt;
     logic        s1_valid_nxt;
     logic [11:0] s1_d1_a_nxt, s1_d2_a_nxt, s1_d1_b_nxt, s1_d2_b_nxt;
     logic        s1_d1_av_nxt, s1_d2_av_nxt, s1_d1_bv_nxt, s1_d2_bv_nxt;
@@ -274,7 +273,7 @@ module sample_ntt #(
     logic [8:0]  coeff_count_nxt;
 
     // -- Working signals (combinational, no register) --
-    logic [5:0]  boff_plus6;   // gbx_boff + 6, 6-bit to detect wraparound at 32
+    logic [3:0]  boff_plus6;   // gbx_boff + 6, 4-bit to detect wraparound at 8
     logic [8:0]  cnt_base;     // coeff_count after Stage-1 contribution (for Stage-0 validity)
     logic        s0_d1_av, s0_d2_av, s0_d1_bv, s0_d2_bv;  // Stage-0 candidate validity
 
@@ -303,7 +302,7 @@ module sample_ntt #(
         oq_valid_nxt[1]  = oq_valid[1];
         coeff_count_nxt  = coeff_count;
 
-        boff_plus6 = 6'd0;
+        boff_plus6 = 4'd0;
         cnt_base   = 9'd0;
         s0_d1_av   = 1'b0;  s0_d2_av = 1'b0;
         s0_d1_bv   = 1'b0;  s0_d2_bv = 1'b0;
@@ -321,7 +320,7 @@ module sample_ntt #(
                     wfifo_count_nxt  = 3'd0;
                     gbx_w0v_nxt      = 1'b0;
                     gbx_w1v_nxt      = 1'b0;
-                    gbx_boff_nxt     = 5'd0;
+                    gbx_boff_nxt     = 3'd0;
                     s1_valid_nxt     = 1'b0;
                     agg_nxt[0] = 12'd0;  agg_nxt[1] = 12'd0;
                     agg_nxt[2] = 12'd0;  agg_nxt[3] = 12'd0;
@@ -481,10 +480,10 @@ module sample_ntt #(
                         // Advance gearbox: consume 6 bytes.
                         // boff_plus6[4:0] == boff_plus6 - 32 when >= 32,
                         // and == boff_plus6 when < 32; both cases are correct.
-                        boff_plus6   = {1'b0, gbx_boff} + 6'd6;
-                        gbx_boff_nxt = boff_plus6[4:0];
+                        boff_plus6   = {1'b0, gbx_boff} + 4'd6;
+                        gbx_boff_nxt = boff_plus6[2:0];
 
-                        if (boff_plus6 >= 6'd32) begin
+                        if (boff_plus6 >= 4'd8) begin
                             // word0 exhausted: shift word1 into word0.
                             // gbx_word1_nxt still holds gbx_word1 at this
                             // point (Step C has not yet run), so the shift
@@ -554,7 +553,7 @@ module sample_ntt #(
             wfifo_count  <= 3'd0;
             gbx_w0v      <= 1'b0;
             gbx_w1v      <= 1'b0;
-            gbx_boff     <= 5'd0;
+            gbx_boff     <= 3'd0;
             s1_valid     <= 1'b0;
             s1_d1_av     <= 1'b0;  s1_d2_av <= 1'b0;
             s1_d1_bv     <= 1'b0;  s1_d2_bv <= 1'b0;
