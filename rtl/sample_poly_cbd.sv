@@ -100,9 +100,11 @@ module sample_poly_cbd #(
     logic               gbx_w1v;
     logic [2:0]         gbx_boff;    // Byte offset within word0 (0 .. 7)
 
-    // 2-entry output skid buffer
+    // 2-entry output circular skid buffer
     beat_t              oq      [2];
-    logic               oq_valid[2];
+    logic               oq_head; // read pointer
+    logic               oq_tail; // write pointer
+    logic [1:0]         oq_cnt;  // element count (0, 1, 2)
 
     // Global progress
     logic [8:0]         coeff_count;
@@ -111,10 +113,10 @@ module sample_poly_cbd #(
     // 3. COMBINATIONAL: AXI Source Output
     // =========================================================================
     always_comb begin
-        t_data_o  = oq[0].data;
-        t_valid_o = oq_valid[0];
-        t_last_o  = oq_valid[0] & oq[0].last;
-        t_keep_o  = oq_valid[0] ? 6'h3F : 6'h00;
+        t_data_o  = oq[oq_head].data;
+        t_valid_o = (oq_cnt != 2'd0);
+        t_last_o  = (oq_cnt != 2'd0) & oq[oq_head].last;
+        t_keep_o  = (oq_cnt != 2'd0) ? 6'h3F : 6'h00;
     end
 
     // =========================================================================
@@ -132,7 +134,7 @@ module sample_poly_cbd #(
         // Extract maximum possible chunk to avoid variable width slicing
         raw_chunk   = {gbx_word1, gbx_word0}[gbx_bit_ptr +: 24];
 
-        have_chunk  = gbx_w0v && (({1'b0, gbx_boff} + 4'(chunk_size)) <= 4'd8 || gbx_w1v);
+        have_chunk  = gbx_w0v && ((is_eta3 ? (gbx_boff <= 3'd5) : (gbx_boff <= 3'd6)) || gbx_w1v);
     end
 
     // =========================================================================
@@ -141,7 +143,8 @@ module sample_poly_cbd #(
 
     // Fixed 3-bit popcount. If η=2, the top bit is padded with 0.
     function automatic logic [1:0] popcount3(input logic [2:0] bits);
-        return {1'b0, bits[0]} + {1'b0, bits[1]} + {1'b0, bits[2]};
+        popcount3[0] = bits[0] ^ bits[1] ^ bits[2];
+        popcount3[1] = (bits[0] & bits[1]) | (bits[0] & bits[2]) | (bits[1] & bits[2]);
     endfunction
 
     logic [2:0]  x_bits [4];
@@ -168,13 +171,12 @@ module sample_poly_cbd #(
 
         // Compute Coefficients
         for (int k = 0; k < 4; k++) begin
+            automatic logic signed [2:0] diff;
             cbd_x[k] = popcount3(x_bits[k]);
             cbd_y[k] = popcount3(y_bits[k]);
 
-            if (cbd_x[k] >= cbd_y[k])
-                cbd_coeff[k] = 12'(cbd_x[k] - cbd_y[k]);
-            else
-                cbd_coeff[k] = 12'(Q) - 12'(cbd_y[k] - cbd_x[k]);
+            diff = 3'(signed'({1'b0, cbd_x[k]})) - 3'(signed'({1'b0, cbd_y[k]}));
+            cbd_coeff[k] = diff[2] ? (12'(Q) + 12'(signed'(diff))) : 12'(unsigned'(diff));
         end
     end
 
@@ -186,7 +188,9 @@ module sample_poly_cbd #(
     logic                gbx_w0v_nxt, gbx_w1v_nxt;
     logic [2:0]          gbx_boff_nxt;
     beat_t               oq_nxt  [2];
-    logic                oq_valid_nxt [2];
+    logic                oq_head_nxt;
+    logic                oq_tail_nxt;
+    logic [1:0]          oq_cnt_nxt;
     logic [8:0]          coeff_count_nxt;
 
     logic [3:0]          boff_plus_chunk;
@@ -202,8 +206,9 @@ module sample_poly_cbd #(
         gbx_boff_nxt     = gbx_boff;
         oq_nxt[0]        = oq[0];
         oq_nxt[1]        = oq[1];
-        oq_valid_nxt[0]  = oq_valid[0];
-        oq_valid_nxt[1]  = oq_valid[1];
+        oq_head_nxt      = oq_head;
+        oq_tail_nxt      = oq_tail;
+        oq_cnt_nxt       = oq_cnt;
         coeff_count_nxt  = coeff_count;
 
         boff_plus_chunk  = 4'd0;
@@ -215,37 +220,33 @@ module sample_poly_cbd #(
                     gbx_w0v_nxt      = 1'b0;
                     gbx_w1v_nxt      = 1'b0;
                     gbx_boff_nxt     = 3'd0;
-                    oq_nxt[0]        = '0; oq_nxt[1] = '0;
-                    oq_valid_nxt[0]  = 1'b0; oq_valid_nxt[1] = 1'b0;
+                    oq_head_nxt      = 1'b0;
+                    oq_tail_nxt      = 1'b0;
+                    oq_cnt_nxt       = 2'd0;
                     coeff_count_nxt  = 9'd0;
                 end
             end
 
             S_RUN: begin
                 // Step A: Output Dequeue
-                if (oq_valid_nxt[0] && t_ready_i) begin
-                    oq_nxt[0]       = oq_nxt[1];
-                    oq_valid_nxt[0] = oq_valid_nxt[1];
-                    oq_valid_nxt[1] = 1'b0;
+                if ((oq_cnt_nxt != 2'd0) && t_ready_i) begin
+                    oq_head_nxt = ~oq_head_nxt;
+                    oq_cnt_nxt  = oq_cnt_nxt - 2'd1;
                 end
 
                 // Step B: CBD Sampling, Packing, and Gearbox Advance
-                oq_full  = oq_valid_nxt[0] && oq_valid_nxt[1];
+                oq_full  = (oq_cnt_nxt == 2'd2);
                 can_emit = have_chunk && !oq_full && (coeff_count_nxt < 9'(TARGET_COEFFS));
 
                 if (can_emit) begin
                     // Emit exactly 4 coefficients
                     coeff_count_nxt = coeff_count_nxt + 9'd4;
 
-                    if (!oq_valid_nxt[0]) begin
-                        oq_nxt[0].data  = {cbd_coeff[3], cbd_coeff[2], cbd_coeff[1], cbd_coeff[0]};
-                        oq_nxt[0].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
-                        oq_valid_nxt[0] = 1'b1;
-                    end else begin
-                        oq_nxt[1].data  = {cbd_coeff[3], cbd_coeff[2], cbd_coeff[1], cbd_coeff[0]};
-                        oq_nxt[1].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
-                        oq_valid_nxt[1] = 1'b1;
-                    end
+                    oq_nxt[oq_tail_nxt].data  = {cbd_coeff[3], cbd_coeff[2], cbd_coeff[1], cbd_coeff[0]};
+                    oq_nxt[oq_tail_nxt].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
+                    
+                    oq_tail_nxt = ~oq_tail_nxt;
+                    oq_cnt_nxt  = oq_cnt_nxt + 2'd1;
 
                     // Advance gearbox dynamically by 2 or 3 bytes
                     boff_plus_chunk = {1'b0, gbx_boff} + 4'(chunk_size);
@@ -273,7 +274,7 @@ module sample_poly_cbd #(
                 end
 
                 // Step D: Completion Check
-                if ((coeff_count_nxt >= 9'(TARGET_COEFFS)) && !oq_valid_nxt[0] && !oq_valid_nxt[1]) begin
+                if ((coeff_count_nxt >= 9'(TARGET_COEFFS)) && (oq_cnt_nxt == 2'd0)) begin
                     state_nxt = S_IDLE;
                 end
             end
@@ -292,8 +293,9 @@ module sample_poly_cbd #(
             gbx_w0v      <= 1'b0;
             gbx_w1v      <= 1'b0;
             gbx_boff     <= 3'd0;
-            oq[0]        <= '0; oq[1] <= '0;
-            oq_valid[0]  <= 1'b0; oq_valid[1] <= 1'b0;
+            oq_head      <= 1'b0;
+            oq_tail      <= 1'b0;
+            oq_cnt       <= 2'd0;
             coeff_count  <= 9'd0;
         end else begin
             state        <= state_nxt;
@@ -310,7 +312,9 @@ module sample_poly_cbd #(
             gbx_w1v      <= gbx_w1v_nxt;
             gbx_boff     <= gbx_boff_nxt;
             oq[0]        <= oq_nxt[0]; oq[1] <= oq_nxt[1];
-            oq_valid[0]  <= oq_valid_nxt[0]; oq_valid[1] <= oq_valid_nxt[1];
+            oq_head      <= oq_head_nxt;
+            oq_tail      <= oq_tail_nxt;
+            oq_cnt       <= oq_cnt_nxt;
             coeff_count  <= coeff_count_nxt;
         end
     end
