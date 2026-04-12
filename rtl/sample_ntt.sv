@@ -405,13 +405,14 @@ module sample_ntt #(
                     cnt_base = coeff_count_nxt;  // count after Step D
 
                     // Stage-0 comparators + 256-limit check
-                    s0_d1_av = (d1_a < 12'(Q)) && (cnt_base < 9'(TARGET_COEFFS));
-                    s0_d2_av = (d2_a < 12'(Q))
+                    // d < 3329 (0xD01) is equivalent to: d[11:8] < 0xD || d == 0xD00
+                    s0_d1_av = ((d1_a[11:8] < 4'hD) || (d1_a == 12'hD00)) && (cnt_base < 9'(TARGET_COEFFS));
+                    s0_d2_av = ((d2_a[11:8] < 4'hD) || (d2_a == 12'hD00))
                              && ((cnt_base + {8'b0, s0_d1_av}) < 9'(TARGET_COEFFS));
-                    s0_d1_bv = (d1_b < 12'(Q))
+                    s0_d1_bv = ((d1_b[11:8] < 4'hD) || (d1_b == 12'hD00))
                              && ((cnt_base + {8'b0, s0_d1_av}
                                            + {8'b0, s0_d2_av}) < 9'(TARGET_COEFFS));
-                    s0_d2_bv = (d2_b < 12'(Q))
+                    s0_d2_bv = ((d2_b[11:8] < 4'hD) || (d2_b == 12'hD00))
                              && ((cnt_base + {8'b0, s0_d1_av}
                                            + {8'b0, s0_d2_av}
                                            + {8'b0, s0_d1_bv}) < 9'(TARGET_COEFFS));
