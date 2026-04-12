@@ -174,18 +174,27 @@ module sample_ntt #(
     // =========================================================================
     //    The double-buffer is viewed as a contiguous 128-bit word:
     //      {gbx_word1, gbx_word0}.
-    //    A variable part-select (fixed width, variable start) extracts the
-    //    current 6-byte window.  This synthesises as a shift-MUX tree.
+    //    A byte-aligned MUX extracts the current 6-byte window based on gbx_boff.
+    //    Because the window advances by 6 bytes and the word holds 8 bytes,
+    //    gbx_boff only ever takes the values 0, 2, 4, 6.
     //    The read is valid only when word0 is loaded AND the 6 bytes either
     //    lie entirely in word0 (boff + 6 <= 8) or word1 is also loaded.
 
-    logic [6:0]  gbx_bit_ptr;   // gbx_boff × 8 — start bit of the window
-    logic [47:0] six_bytes;     // 6-byte window extracted from the double-buffer
-    logic        have_6bytes;   // Gearbox can serve a complete 6-byte window
+    logic [127:0] double_word;  // 128-bit double-buffer
+    logic [47:0]  six_bytes;    // 6-byte window extracted from the double-buffer
+    logic         have_6bytes;  // Gearbox can serve a complete 6-byte window
 
     always_comb begin
-        gbx_bit_ptr = {1'b0, gbx_boff, 3'b000};              // gbx_boff * 8 (7 bits)
-        six_bytes   = {gbx_word1, gbx_word0}[gbx_bit_ptr +: 48];
+        double_word = {gbx_word1, gbx_word0};
+
+        case (gbx_boff)
+            3'd0: six_bytes = double_word[0  +: 48];
+            3'd2: six_bytes = double_word[16 +: 48];
+            3'd4: six_bytes = double_word[32 +: 48];
+            3'd6: six_bytes = double_word[48 +: 48];
+            default: six_bytes = 48'd0;
+        endcase
+
         have_6bytes = gbx_w0v
                     && (({1'b0, gbx_boff} + 4'd6) <= 4'd8 || gbx_w1v);
     end
