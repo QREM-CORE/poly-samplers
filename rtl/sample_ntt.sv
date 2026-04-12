@@ -174,18 +174,27 @@ module sample_ntt #(
     // =========================================================================
     //    The double-buffer is viewed as a contiguous 128-bit word:
     //      {gbx_word1, gbx_word0}.
-    //    A variable part-select (fixed width, variable start) extracts the
-    //    current 6-byte window.  This synthesises as a shift-MUX tree.
+    //    A byte-aligned MUX extracts the current 6-byte window based on gbx_boff.
+    //    Because the window advances by 6 bytes and the word holds 8 bytes,
+    //    gbx_boff only ever takes the values 0, 2, 4, 6.
     //    The read is valid only when word0 is loaded AND the 6 bytes either
     //    lie entirely in word0 (boff + 6 <= 8) or word1 is also loaded.
 
-    logic [6:0]  gbx_bit_ptr;   // gbx_boff × 8 — start bit of the window
-    logic [47:0] six_bytes;     // 6-byte window extracted from the double-buffer
-    logic        have_6bytes;   // Gearbox can serve a complete 6-byte window
+    logic [127:0] double_word;  // 128-bit double-buffer
+    logic [47:0]  six_bytes;    // 6-byte window extracted from the double-buffer
+    logic         have_6bytes;  // Gearbox can serve a complete 6-byte window
 
     always_comb begin
-        gbx_bit_ptr = {1'b0, gbx_boff, 3'b000};              // gbx_boff * 8 (7 bits)
-        six_bytes   = {gbx_word1, gbx_word0}[gbx_bit_ptr +: 48];
+        double_word = {gbx_word1, gbx_word0};
+
+        case (gbx_boff)
+            3'd0: six_bytes = double_word[0  +: 48];
+            3'd2: six_bytes = double_word[16 +: 48];
+            3'd4: six_bytes = double_word[32 +: 48];
+            3'd6: six_bytes = double_word[48 +: 48];
+            default: six_bytes = 48'd0;
+        endcase
+
         have_6bytes = gbx_w0v
                     && (({1'b0, gbx_boff} + 4'd6) <= 4'd8 || gbx_w1v);
     end
@@ -356,92 +365,30 @@ module sample_ntt #(
                 //    Pack up to four candidates into the aggregator; emit a
                 //    48-bit beat every time four coefficients accumulate.
                 if (s1_valid && pipe_advance) begin
+                    automatic logic [3:0]  s1_v   = {s1_d2_bv, s1_d1_bv, s1_d2_av, s1_d1_av};
+                    automatic logic [11:0] s1_val [4];
+                    s1_val[0] = s1_d1_a; s1_val[1] = s1_d2_a;
+                    s1_val[2] = s1_d1_b; s1_val[3] = s1_d2_b;
 
-                    if (s1_d1_av) begin
-                        agg_nxt[agg_count_nxt[1:0]] = s1_d1_a;
-                        agg_count_nxt   = agg_count_nxt + 3'd1;
-                        coeff_count_nxt = coeff_count_nxt + 9'd1;
-                        if (agg_count_nxt == 3'd4) begin
-                            if (!oq_valid_nxt[0]) begin
-                                oq_nxt[0].data  = {agg_nxt[3], agg_nxt[2],
-                                                   agg_nxt[1], agg_nxt[0]};
-                                oq_nxt[0].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
-                                oq_valid_nxt[0] = 1'b1;
-                            end else begin
-                                oq_nxt[1].data  = {agg_nxt[3], agg_nxt[2],
-                                                   agg_nxt[1], agg_nxt[0]};
-                                oq_nxt[1].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
-                                oq_valid_nxt[1] = 1'b1;
+                    for (int i = 0; i < 4; i++) begin
+                        if (s1_v[i]) begin
+                            agg_nxt[agg_count_nxt[1:0]] = s1_val[i];
+                            agg_count_nxt   = agg_count_nxt + 3'd1;
+                            coeff_count_nxt = coeff_count_nxt + 9'd1;
+                            if (agg_count_nxt == 3'd4) begin
+                                if (!oq_valid_nxt[0]) begin
+                                    oq_nxt[0].data  = {agg_nxt[3], agg_nxt[2],
+                                                       agg_nxt[1], agg_nxt[0]};
+                                    oq_nxt[0].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
+                                    oq_valid_nxt[0] = 1'b1;
+                                end else begin
+                                    oq_nxt[1].data  = {agg_nxt[3], agg_nxt[2],
+                                                       agg_nxt[1], agg_nxt[0]};
+                                    oq_nxt[1].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
+                                    oq_valid_nxt[1] = 1'b1;
+                                end
+                                agg_count_nxt = 3'd0;
                             end
-                            agg_nxt[0] = 12'd0;  agg_nxt[1] = 12'd0;
-                            agg_nxt[2] = 12'd0;  agg_nxt[3] = 12'd0;
-                            agg_count_nxt = 3'd0;
-                        end
-                    end
-
-                    if (s1_d2_av) begin
-                        agg_nxt[agg_count_nxt[1:0]] = s1_d2_a;
-                        agg_count_nxt   = agg_count_nxt + 3'd1;
-                        coeff_count_nxt = coeff_count_nxt + 9'd1;
-                        if (agg_count_nxt == 3'd4) begin
-                            if (!oq_valid_nxt[0]) begin
-                                oq_nxt[0].data  = {agg_nxt[3], agg_nxt[2],
-                                                   agg_nxt[1], agg_nxt[0]};
-                                oq_nxt[0].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
-                                oq_valid_nxt[0] = 1'b1;
-                            end else begin
-                                oq_nxt[1].data  = {agg_nxt[3], agg_nxt[2],
-                                                   agg_nxt[1], agg_nxt[0]};
-                                oq_nxt[1].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
-                                oq_valid_nxt[1] = 1'b1;
-                            end
-                            agg_nxt[0] = 12'd0;  agg_nxt[1] = 12'd0;
-                            agg_nxt[2] = 12'd0;  agg_nxt[3] = 12'd0;
-                            agg_count_nxt = 3'd0;
-                        end
-                    end
-
-                    if (s1_d1_bv) begin
-                        agg_nxt[agg_count_nxt[1:0]] = s1_d1_b;
-                        agg_count_nxt   = agg_count_nxt + 3'd1;
-                        coeff_count_nxt = coeff_count_nxt + 9'd1;
-                        if (agg_count_nxt == 3'd4) begin
-                            if (!oq_valid_nxt[0]) begin
-                                oq_nxt[0].data  = {agg_nxt[3], agg_nxt[2],
-                                                   agg_nxt[1], agg_nxt[0]};
-                                oq_nxt[0].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
-                                oq_valid_nxt[0] = 1'b1;
-                            end else begin
-                                oq_nxt[1].data  = {agg_nxt[3], agg_nxt[2],
-                                                   agg_nxt[1], agg_nxt[0]};
-                                oq_nxt[1].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
-                                oq_valid_nxt[1] = 1'b1;
-                            end
-                            agg_nxt[0] = 12'd0;  agg_nxt[1] = 12'd0;
-                            agg_nxt[2] = 12'd0;  agg_nxt[3] = 12'd0;
-                            agg_count_nxt = 3'd0;
-                        end
-                    end
-
-                    if (s1_d2_bv) begin
-                        agg_nxt[agg_count_nxt[1:0]] = s1_d2_b;
-                        agg_count_nxt   = agg_count_nxt + 3'd1;
-                        coeff_count_nxt = coeff_count_nxt + 9'd1;
-                        if (agg_count_nxt == 3'd4) begin
-                            if (!oq_valid_nxt[0]) begin
-                                oq_nxt[0].data  = {agg_nxt[3], agg_nxt[2],
-                                                   agg_nxt[1], agg_nxt[0]};
-                                oq_nxt[0].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
-                                oq_valid_nxt[0] = 1'b1;
-                            end else begin
-                                oq_nxt[1].data  = {agg_nxt[3], agg_nxt[2],
-                                                   agg_nxt[1], agg_nxt[0]};
-                                oq_nxt[1].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
-                                oq_valid_nxt[1] = 1'b1;
-                            end
-                            agg_nxt[0] = 12'd0;  agg_nxt[1] = 12'd0;
-                            agg_nxt[2] = 12'd0;  agg_nxt[3] = 12'd0;
-                            agg_count_nxt = 3'd0;
                         end
                     end
 
@@ -458,13 +405,14 @@ module sample_ntt #(
                     cnt_base = coeff_count_nxt;  // count after Step D
 
                     // Stage-0 comparators + 256-limit check
-                    s0_d1_av = (d1_a < 12'(Q)) && (cnt_base < 9'(TARGET_COEFFS));
-                    s0_d2_av = (d2_a < 12'(Q))
+                    // d < 3329 (0xD01) is equivalent to: d[11:8] < 0xD || d == 0xD00
+                    s0_d1_av = ((d1_a[11:8] < 4'hD) || (d1_a == 12'hD00)) && (cnt_base < 9'(TARGET_COEFFS));
+                    s0_d2_av = ((d2_a[11:8] < 4'hD) || (d2_a == 12'hD00))
                              && ((cnt_base + {8'b0, s0_d1_av}) < 9'(TARGET_COEFFS));
-                    s0_d1_bv = (d1_b < 12'(Q))
+                    s0_d1_bv = ((d1_b[11:8] < 4'hD) || (d1_b == 12'hD00))
                              && ((cnt_base + {8'b0, s0_d1_av}
                                            + {8'b0, s0_d2_av}) < 9'(TARGET_COEFFS));
-                    s0_d2_bv = (d2_b < 12'(Q))
+                    s0_d2_bv = ((d2_b[11:8] < 4'hD) || (d2_b == 12'hD00))
                              && ((cnt_base + {8'b0, s0_d1_av}
                                            + {8'b0, s0_d2_av}
                                            + {8'b0, s0_d1_bv}) < 9'(TARGET_COEFFS));
