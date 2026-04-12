@@ -121,20 +121,18 @@ module sample_poly_cbd #(
     // 4. COMBINATIONAL: Gearbox Dynamic Read Window
     // =========================================================================
     logic [6:0]  gbx_bit_ptr;
-    logic [79:0] gbx_concat;  // Narrowed: only 80 bits needed (max offset 7 + 3 bytes = bit 79)
-    logic [23:0] raw_chunk;   // Always extract 24 bits (3 bytes max)
+    logic [23:0] raw_chunk; // Always extract 24 bits (3 bytes max)
     logic        have_chunk;
-    logic [2:0]  chunk_size;  // Dynamically 2 or 3
-
-    assign gbx_concat = {gbx_word1[15:0], gbx_word0};
+    logic [2:0]  chunk_size; // Dynamically 2 or 3
 
     always_comb begin
         chunk_size  = is_eta3 ? 3'd3 : 3'd2;
         gbx_bit_ptr = {1'b0, gbx_boff, 3'b000};           // gbx_boff * 8 (7 bits)
 
-        raw_chunk   = gbx_concat[gbx_bit_ptr +: 24];
+        // Extract maximum possible chunk to avoid variable width slicing
+        raw_chunk   = {gbx_word1, gbx_word0}[gbx_bit_ptr +: 24];
 
-        have_chunk  = gbx_w0v && (({1'b0, gbx_boff} + 4'(chunk_size)) <= 4'd8 || gbx_w1v);
+        have_chunk  = gbx_w0v && ((is_eta3 ? (gbx_boff <= 3'd5) : (gbx_boff <= 3'd6)) || gbx_w1v);
     end
 
     // =========================================================================
@@ -143,7 +141,8 @@ module sample_poly_cbd #(
 
     // Fixed 3-bit popcount. If η=2, the top bit is padded with 0.
     function automatic logic [1:0] popcount3(input logic [2:0] bits);
-        return {1'b0, bits[0]} + {1'b0, bits[1]} + {1'b0, bits[2]};
+        popcount3[0] = bits[0] ^ bits[1] ^ bits[2];
+        popcount3[1] = (bits[0] & bits[1]) | (bits[0] & bits[2]) | (bits[1] & bits[2]);
     endfunction
 
     logic [2:0]  x_bits [4];
@@ -170,13 +169,12 @@ module sample_poly_cbd #(
 
         // Compute Coefficients
         for (int k = 0; k < 4; k++) begin
+            automatic logic signed [2:0] diff;
             cbd_x[k] = popcount3(x_bits[k]);
             cbd_y[k] = popcount3(y_bits[k]);
 
-            if (cbd_x[k] >= cbd_y[k])
-                cbd_coeff[k] = 12'(cbd_x[k] - cbd_y[k]);
-            else
-                cbd_coeff[k] = 12'(Q) - 12'(cbd_y[k] - cbd_x[k]);
+            diff = 3'(signed'({1'b0, cbd_x[k]})) - 3'(signed'({1'b0, cbd_y[k]}));
+            cbd_coeff[k] = diff[2] ? (12'(Q) + 12'(signed'(diff))) : 12'(unsigned'(diff));
         end
     end
 
@@ -217,7 +215,6 @@ module sample_poly_cbd #(
                     gbx_w0v_nxt      = 1'b0;
                     gbx_w1v_nxt      = 1'b0;
                     gbx_boff_nxt     = 3'd0;
-                    oq_nxt[0]        = '0; oq_nxt[1] = '0;
                     oq_valid_nxt[0]  = 1'b0; oq_valid_nxt[1] = 1'b0;
                     coeff_count_nxt  = 9'd0;
                 end
@@ -294,7 +291,6 @@ module sample_poly_cbd #(
             gbx_w0v      <= 1'b0;
             gbx_w1v      <= 1'b0;
             gbx_boff     <= 3'd0;
-            oq[0]        <= '0; oq[1] <= '0;
             oq_valid[0]  <= 1'b0; oq_valid[1] <= 1'b0;
             coeff_count  <= 9'd0;
         end else begin
