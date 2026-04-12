@@ -120,17 +120,28 @@ module sample_poly_cbd #(
     // =========================================================================
     // 4. COMBINATIONAL: Gearbox Dynamic Read Window
     // =========================================================================
-    logic [6:0]  gbx_bit_ptr;
+    logic [87:0] gbx_concat;
     logic [23:0] raw_chunk; // Always extract 24 bits (3 bytes max)
     logic        have_chunk;
     logic [2:0]  chunk_size; // Dynamically 2 or 3
 
+    assign gbx_concat = {gbx_word1[23:0], gbx_word0};
+
     always_comb begin
         chunk_size  = is_eta3 ? 3'd3 : 3'd2;
-        gbx_bit_ptr = {1'b0, gbx_boff, 3'b000};           // gbx_boff * 8 (7 bits)
 
-        // Extract maximum possible chunk to avoid variable width slicing
-        raw_chunk   = {gbx_word1, gbx_word0}[gbx_bit_ptr +: 24];
+        // Fixed multiplexer replaces variable part-select barrel shifter
+        case (gbx_boff)
+            3'd0: raw_chunk = gbx_concat[23:0];
+            3'd1: raw_chunk = gbx_concat[31:8];
+            3'd2: raw_chunk = gbx_concat[39:16];
+            3'd3: raw_chunk = gbx_concat[47:24];
+            3'd4: raw_chunk = gbx_concat[55:32];
+            3'd5: raw_chunk = gbx_concat[63:40];
+            3'd6: raw_chunk = gbx_concat[71:48];
+            3'd7: raw_chunk = gbx_concat[79:56];
+            default: raw_chunk = '0;
+        endcase
 
         have_chunk  = gbx_w0v && (({1'b0, gbx_boff} + 4'(chunk_size)) <= 4'd8 || gbx_w1v);
     end
