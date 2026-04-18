@@ -147,6 +147,10 @@ module sample_ntt #(
     logic               s1_d1_av, s1_d2_av, s1_d1_bv, s1_d2_bv;
 
 
+    // -- Packer Buffer (8 slots to handle 4 input + 4 already there) --
+    logic [7:0][COEFF_W-1:0] packer_buf;
+    logic [3:0]              packer_count; // 0 .. 8
+
     // -- Global progress --
     logic [8:0]  coeff_count;   // 0 .. 256  (9 bits)
 
@@ -155,16 +159,30 @@ module sample_ntt #(
     // =========================================================================
 
     always_comb begin
-        wr_en_o   = s1_valid ? {s1_d2_bv, s1_d1_bv, s1_d2_av, s1_d1_av} : 4'b0;
-        wr_data_o = {s1_d2_b,  s1_d1_b,  s1_d2_a,  s1_d1_a };
+        automatic logic [8:0] emitted_count = coeff_count - 9'(packer_count);
 
-        wr_idx_o[0] = coeff_count[COEFF_IDX_W-1:0];
-        wr_idx_o[1] = coeff_count[COEFF_IDX_W-1:0] + {{(COEFF_IDX_W-1){1'b0}}, s1_d1_av};
-        wr_idx_o[2] = coeff_count[COEFF_IDX_W-1:0] + {{(COEFF_IDX_W-2){1'b0}}, {1'b0, s1_d1_av} + {1'b0, s1_d2_av}};
-        wr_idx_o[3] = coeff_count[COEFF_IDX_W-1:0] + {{(COEFF_IDX_W-2){1'b0}}, {1'b0, s1_d1_av} + {1'b0, s1_d2_av} + {1'b0, s1_d1_bv}};
+        // Standard 4-wide beats
+        wr_valid_o = (packer_count >= 4);
+        wr_en_o    = wr_valid_o ? 4'b1111 : 4'b0000;
+        wr_data_o  = {packer_buf[3], packer_buf[2], packer_buf[1], packer_buf[0]};
 
-        wr_valid_o  = s1_valid && |{s1_d2_bv, s1_d1_bv, s1_d2_av, s1_d1_av};
-        done_o      = (coeff_count >= 9'(NCOEFF)) && !s1_valid;
+        // Final flush: if sampling is complete, emit whatever is left
+        if ((coeff_count >= 9'(NCOEFF)) && (packer_count > 0)) begin
+            wr_valid_o = 1'b1;
+            case (packer_count)
+                4'd1: wr_en_o = 4'b0001;
+                4'd2: wr_en_o = 4'b0011;
+                4'd3: wr_en_o = 4'b0111;
+                default: wr_en_o = 4'b1111;
+            endcase
+        end
+
+        wr_idx_o[0] = emitted_count[COEFF_IDX_W-1:0];
+        wr_idx_o[1] = emitted_count[COEFF_IDX_W-1:0] + 8'd1;
+        wr_idx_o[2] = emitted_count[COEFF_IDX_W-1:0] + 8'd2;
+        wr_idx_o[3] = emitted_count[COEFF_IDX_W-1:0] + 8'd3;
+
+        done_o = (coeff_count >= 9'(NCOEFF)) && (packer_count == 0) && !s1_valid;
     end
 
     // =========================================================================
@@ -234,7 +252,9 @@ module sample_ntt #(
         s1_accepted  = {2'b0, s1_d1_av} + {2'b0, s1_d2_av}
                      + {2'b0, s1_d1_bv} + {2'b0, s1_d2_bv};
 
-        s1_stall     = s1_valid && stall_i;
+        // Stall pipeline if packer potentially overflows.
+        // Even if we emit 4 this cycle, we only have room for 4 more.
+        s1_stall     = s1_valid && (packer_count > 4'd4) && stall_i;
         pipe_advance = !s1_stall;
     end
 
@@ -264,6 +284,8 @@ module sample_ntt #(
     logic [11:0] s1_d1_a_nxt, s1_d2_a_nxt, s1_d1_b_nxt, s1_d2_b_nxt;
     logic        s1_d1_av_nxt, s1_d2_av_nxt, s1_d1_bv_nxt, s1_d2_bv_nxt;
     logic [8:0]  coeff_count_nxt;
+    logic [7:0][11:0] packer_buf_nxt;
+    logic [3:0]       packer_count_nxt;
 
     // -- Working signals (combinational, no register) --
     logic [3:0]  boff_plus6;   // gbx_boff + 6, 4-bit to detect wraparound at 8
@@ -288,6 +310,8 @@ module sample_ntt #(
         s1_d1_av_nxt     = s1_d1_av;  s1_d2_av_nxt = s1_d2_av;
         s1_d1_bv_nxt     = s1_d1_bv;  s1_d2_bv_nxt = s1_d2_bv;
         coeff_count_nxt  = coeff_count;
+        packer_buf_nxt   = packer_buf;
+        packer_count_nxt = packer_count;
 
         boff_plus6 = 4'd0;
         cnt_base   = 9'd0;
@@ -310,6 +334,7 @@ module sample_ntt #(
                     gbx_boff_nxt     = 3'd0;
                     s1_valid_nxt     = 1'b0;
                     coeff_count_nxt  = 9'd0;
+                    packer_count_nxt = 4'd0;
                 end
             end
 
@@ -326,9 +351,8 @@ module sample_ntt #(
                     wfifo_count_nxt  = wfifo_count_nxt  + 3'd1;
                 end
 
-                // ── Step D: Stage 1 update coeff_count ───────────────────
                 if (s1_valid && pipe_advance) begin
-                    coeff_count_nxt = coeff_count_nxt + {6'b0, s1_accepted};
+                    coeff_count_nxt = coeff_count + {6'b0, s1_accepted};
                     s1_valid_nxt = 1'b0;  // Stage 1 consumed
                 end
                 // else (pipe_advance == 0): Stage 1 held by default.
@@ -405,7 +429,8 @@ module sample_ntt #(
                 //    Transition to S_IDLE once all coefficients have been
                 //    counted AND the pipeline is drained.
                 if ((coeff_count_nxt >= 9'(TARGET_COEFFS))
-                    && !s1_valid_nxt) begin
+                    && !s1_valid_nxt
+                    && (packer_count_nxt == 0)) begin
                     state_nxt = S_IDLE;
                 end
 
@@ -413,6 +438,46 @@ module sample_ntt #(
 
             default: state_nxt = S_IDLE;
         endcase
+
+        // ── Step D2: Packer Logic (Outside Case) ─────────────────────────
+        begin
+            automatic int pop_cnt = 0;
+            automatic int push_cnt = 0;
+            automatic logic [7:0][11:0] tmp_buf;
+
+            // 1. Determine Pop
+            if (wr_valid_o && !stall_i) begin
+                pop_cnt = (packer_count >= 4) ? 4 : int'(packer_count);
+            end
+
+            // 2. Shift Buffer
+            for (int i = 0; i < 8; i++) begin
+                if (i < (8 - pop_cnt))
+                    tmp_buf[i] = packer_buf[i + pop_cnt];
+                else
+                    tmp_buf[i] = '0;
+            end
+
+            // 3. Determine Push (only in S_RUN and if pipe advances)
+            if (state == S_RUN && s1_valid && pipe_advance) begin
+                automatic logic [11:0] in_vals [4];
+                automatic logic [3:0]  in_v;
+                in_vals[0] = s1_d1_a;  in_v[0] = s1_d1_av;
+                in_vals[1] = s1_d2_a;  in_v[1] = s1_d2_av;
+                in_vals[2] = s1_d1_b;  in_v[2] = s1_d1_bv;
+                in_vals[3] = s1_d2_b;  in_v[3] = s1_d2_bv;
+
+                for (int i = 0; i < 4; i++) begin
+                    if (in_v[i]) begin
+                        tmp_buf[int'(packer_count) - pop_cnt + push_cnt] = in_vals[i];
+                        push_cnt++;
+                    end
+                end
+            end
+
+            packer_buf_nxt   = tmp_buf;
+            packer_count_nxt = 4'(int'(packer_count) - pop_cnt + push_cnt);
+        end
     end
 
     // =========================================================================
@@ -440,6 +505,7 @@ module sample_ntt #(
             s1_d1_av     <= 1'b0;  s1_d2_av <= 1'b0;
             s1_d1_bv     <= 1'b0;  s1_d2_bv <= 1'b0;
             coeff_count  <= 9'd0;
+            packer_count <= 4'd0;
         end else begin
             state        <= state_nxt;
 
@@ -463,6 +529,8 @@ module sample_ntt #(
             s1_d1_av     <= s1_d1_av_nxt;  s1_d2_av <= s1_d2_av_nxt;
             s1_d1_bv     <= s1_d1_bv_nxt;  s1_d2_bv <= s1_d2_bv_nxt;
             coeff_count  <= coeff_count_nxt;
+            packer_buf   <= packer_buf_nxt;
+            packer_count <= packer_count_nxt;
 
             // Wide FIFO write: a single DWIDTH-bit assignment per beat.
             // One write port — BRAM-inference-friendly (Issue 1 fix).
