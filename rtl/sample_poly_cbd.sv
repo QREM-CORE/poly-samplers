@@ -1,51 +1,34 @@
-// -----------------------------------------------------------------------------
-// Author      : Salwan Aldhahab, Kiet Le
-// Module      : sample_poly_cbd
-// Standard    : FIPS 203 ML-KEM — Algorithm 8 (SamplePolyCBD)
-//
-// Description :
-//   Deterministic sampler that converts a fixed-length byte stream into
-//   exactly 256 polynomial coefficients sampled from the centered binomial
-//   distribution D_η(R_q), where η ∈ {2, 3} and q = 3329.
-//
-//   Every ETA bytes (2 for η=2, 3 for η=3) are converted to bits and
-//   partitioned into 4 groups of 2η bits.  Within each group the first η
-//   bits are summed to give x, the second η bits are summed to give y,
-//   and the coefficient is (x − y) mod q.
-//
-//   Unified Architecture: Supports both η=2 and η=3 at runtime via the
-//   `is_eta3` control signal.
-//
-//   Input byte count: 64·η  (128 for η=2, 192 for η=3).
-//   Output: 64 beats of 4 × 12-bit packed coefficients (256 total).
-//
-// Micro-architecture:
-//
-//   ┌───────────┐   AXI-S sink   ┌────────────┐  24 bits/cycle  ┌───────────┐
-//   │  Keccak   │──────────────▸ │  Gearbox   │───────────────▸ │  Dynamic  │
-//   │  (SHAKE)  │   64b beats    │ 128b dbl-  │  part-select    │  Mux &    │
-//   └───────────┘  direct load   │  buffer    │                 │  Popcount │
-//                                └────────────┘                 └─────┬─────┘
-//                                                                     │ 4 coeffs/cycle
-//                                      AXI-S source             ┌─────▼─────┐
-//                                ◂──────────────────────────── │ 2-entry   │
-//                                  48-bit beats                │ Skid Buf  │
-//                                                              └───────────┘
-//
-//   • Gearbox      – 128-bit double-buffer (word0 + word1).  AXI beats load
-//                    directly into free slots — no intermediate FIFO.  Reads
-//                    a fixed 24-bit window per cycle via variable part-select;
-//                    handles cross-word-boundary spans transparently.
-//   • Dynamic Mux  – routes exactly 16 bits (η=2) or 24 bits (η=3) from the
-//     & Popcount     gearbox into a unified 3-bit popcount and modulo logic.
-//                    Produces exactly 4 coefficients per cycle.
-//   • Skid buffer  – 2-entry output queue absorbs downstream back-pressure.
-//
-// Handshake notes:
-//   • t_ready_o is registered — one-cycle latency between an internal state
-//     change and the upstream source seeing back-pressure.
-//   • t_last_o marks the final (64th) output beat (coefficients 253-256).
-// -----------------------------------------------------------------------------
+/*
+ * Author      : Salwan Aldhahab, Kiet Le
+ * Module      : sample_poly_cbd
+ * Standard    : FIPS 203 ML-KEM — Algorithm 8 (SamplePolyCBD)
+ *
+ * Description :
+ * Deterministic sampler that converts a fixed-length byte stream into
+ * exactly 256 polynomial coefficients sampled from the centered binomial
+ * distribution D_η(R_q), where η ∈ {2, 3} and q = 3329.
+ *
+ * Supports runtime switching between η=2 and η=3 via the is_eta3 signal.
+ * Bits are partitioned into 4 groups of 2η bits. Within each group, the
+ * first η bits are summed (x) and the second η bits are summed (y).
+ * The resulting coefficient is (x − y) mod q.
+ * Computed coefficients are emitted four at a time via the memory writer.
+ *
+ * Micro-architecture :
+ * * Gearbox      : 128-bit double-buffer loaded directly from the AXI-Stream
+ * sink (no FIFO). Extracts a continuous 24-bit read window
+ * per cycle, handling cross-word spans.
+ * * Dynamic Mux  : Combinational logic that dynamically routes 16 bits (η=2)
+ * or 24 bits (η=3) from the gearbox window.
+ * * Popcount     : Unified 3-bit popcount (MSB zero-padded for η=2) and
+ * modulo subtraction logic that evaluates 4 coefficients
+ * in parallel.
+ *
+ * Handshake & Flow Control :
+ * * t_ready_o is registered and driven solely by gearbox slot availability.
+ * * stall_i halts gearbox advancement and coefficient emission.
+ * * done_o asserts once all 256 coefficients have been delivered.
+ */
 
 module sample_poly_cbd #(
     parameter int DWIDTH      = 64,             // Input AXI beat width (bits)

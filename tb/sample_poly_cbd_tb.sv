@@ -1,17 +1,24 @@
-// -----------------------------------------------------------------------------
-// Author      : Salwan Aldhahab
-// Module      : sample_poly_cbd_tb
-// Standard    : FIPS 203 ML-KEM — verification of Algorithm 8 (SamplePolyCBD)
-//
-// Description :
-//   Self-checking testbench for the unified sample_poly_cbd module.
-//
-//   1. Dynamically tests both η=2 (ML-KEM-512) and η=3 (ML-KEM-768/1024).
-//   2. Generates a deterministic pseudo-random byte stream.
-//   3. Builds a software-based golden reference for the current η.
-//   4. Drives the AXI4-Stream sink and applies 75% output backpressure.
-//   5. Checks cycle-accurate handshakes and validates all 256 coefficients.
-// -----------------------------------------------------------------------------
+/*
+ * Author      : Salwan Aldhahab, Kiet Le
+ * Module      : sample_poly_cbd_tb
+ * Standard    : FIPS 203 ML-KEM — Algorithm 8 (SamplePolyCBD)
+ *
+ * Description :
+ * Self-checking testbench for the unified sample_poly_cbd module.
+ *
+ * 1. Dynamically executes tests for both η=2 (ML-KEM-512) and
+ * η=3 (ML-KEM-768/1024) in a single run.
+ * 2. Generates a deterministic pseudo-random byte stream (input stimulus).
+ * 3. Executes the CBD algorithm in software to build a golden reference
+ * of 256 expected 12-bit coefficients for the active η value.
+ * 4. Drives the byte stream into the DUT via an AXI4-Stream sink.
+ * 5. Applies deterministic output backpressure (1-in-4 cycle stall) to
+ * verify pipeline flow control.
+ * 6. Monitors the 4-lane polynomial memory writer interface, comparing
+ * valid coefficients and memory indices against the golden reference.
+ * 7. Terminates and reports PASS/FAIL upon receiving the done_o signal
+ * for each configuration.
+ */
 
 module sample_poly_cbd_tb;
 
