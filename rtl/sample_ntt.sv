@@ -1,76 +1,36 @@
-// -----------------------------------------------------------------------------
-// Author      : Salwan Aldhahab, Kiet Le
-// Module      : sample_ntt
-// Standard    : FIPS 203 ML-KEM — Algorithm 7 (SampleNTT)
-//
-// Description :
-//   Rejection sampler that converts an infinite SHAKE-128 byte stream into
-//   exactly 256 NTT-domain coefficients in Z_q  (q = 3329).
-//
-//   Every 3 input bytes (b0, b1, b2) produce two 12-bit candidates:
-//       d1 = b0      + 256 * (b1 mod 16)       i.e.  b0 + 256*(b1[3:0])
-//       d2 = (b1/16) +  16 * b2                 i.e.  (b1>>4) + 16*b2
-//   A candidate is accepted only when it is < q.  Rejected candidates are
-//   simply discarded and the next 3-byte triple is consumed.
-//
-//   Accepted coefficients are packed four-at-a-time into a 48-bit output
-//   beat  {c3[11:0], c2[11:0], c1[11:0], c0[11:0]}  and emitted over an
-//   AXI4-Stream source interface (64 beats total for 256 coefficients).
-//
-// Micro-architecture (revised):
-//
-//   ┌───────────┐   AXI-S sink   ┌────────────┐   64-bit words  ┌──────────┐
-//   │  Keccak   │──────────────▸ │    FIFO    │───────────────▸ │ Gearbox  │
-//   │  (SHAKE)  │   64b beats    │  4 entries  │  1 read/cycle   │ 6B/cycle │
-//   └───────────┘  1 write/beat  └────────────┘                 └────┬─────┘
-//                                                                     │ 6 bytes (2 triples)
-//                                                              ┌──────▼──────┐
-//                                                              │  Parallel   │
-//                                                              │  Samplers   │
-//                                                              │  (Stage 0)  │
-//                                                              └──────┬──────┘
-//                                                                     │ pipeline register
-//                                                              ┌──────▼──────┐
-//                                                              │  Stage 1    │
-//                                                              │  (Reg)      │
-//                                                              └──────┬──────┘
-//                                                                     │ 0-4 coeffs/cycle
-//                                                              ┌──────▼──────┐
-//                                      AXI-S source           │ 4-coeff     │
-//                                ◂─────────────────────────── │ Packer +    │
-//                                  48-bit beats               │ Skid Buf    │
-//                                                              └─────────────┘
-//
-//   • FIFO         – 4 × 64-bit word entries.  Each AXI beat is stored with a
-//                    single DWIDTH-bit write (one write port).
-//   • Gearbox      – 128-bit double-buffer (word0 + word1).  Reads exactly
-//                    6 bytes per cycle via a variable part-select shift-MUX;
-//                    handles cross-word-boundary spans transparently.
-//   • Stage 0      – two triples evaluated in parallel (purely combinational).
-//   • Stage 1      – pipeline register latching Stage 0 comparator outputs,
-//                    breaking the deep combinational path before the aggregator.
-//   • 4-coeff packer – receives 0-4 accepted 12-bit values per cycle from
-//                    Stage 1; emits a packed 48-bit beat whenever 4 accumulate.
-//   • Skid buffer  – 2-entry output queue absorbs downstream back-pressure.
-//
-// Changes from v1:
-//   1. Wide FIFO replaces the byte-addressable array: each AXI beat writes a
-//      single 256-bit word (eliminates the implicit 32-write-port RAM that
-//      prevented BRAM inference and generated a large LUT crossbar).
-//   2. A gearbox double-buffer reads 6 bytes/cycle using a variable part-select
-//      (synthesises as a shift-MUX, not multi-ported RAM).
-//   3. Two triples are processed in parallel; comparator outputs are registered
-//      (Stage 0 → Stage 1 pipeline) to improve Fmax.
-//   4. t_ready_o is now registered: decouples upstream back-pressure from the
-//      combinational path driven by t_ready_i.
-//
-// Handshake notes:
-//   • t_ready_o is registered — one-cycle latency between an internal count
-//     change and the upstream source seeing back-pressure.
-//   • t_last_o marks the final (64th) output beat (coefficients 253-256).
-//   • done pulses high for one cycle after all 256 coefficients are delivered,
-//     the output queue is drained, and the pipeline is empty.
-// -----------------------------------------------------------------------------
+/*
+ * Author      : Salwan Aldhahab, Kiet Le
+ * Module      : sample_ntt
+ * Standard    : FIPS 203 ML-KEM — Algorithm 7 (SampleNTT)
+ *
+ * Description :
+ *   Rejection sampler that converts a SHAKE-128 byte stream into exactly
+ *   256 NTT-domain coefficients in Z_q (q = 3329).
+ *
+ *   Every 3 input bytes (b0, b1, b2) produce two 12-bit candidates:
+ *       d1 = b0 + 256 * (b1 mod 16)
+ *       d2 = (b1 / 16) + 16 * b2
+ *   Candidates are accepted if < 3329. Rejected candidates are discarded.
+ *   Accepted coefficients are aggregated and emitted four at a time via
+ *   the memory writer interface.
+ *
+ * Micro-architecture :
+ *   * Wide FIFO : 4-entry, DWIDTH-bit FIFO that absorbs AXI4-Stream beats
+ *                 using a single write port to facilitate BRAM inference.
+ *   * Gearbox   : 128-bit double-buffer that extracts a continuous 6-byte
+ *                 read window per cycle, handling cross-word spans.
+ *   * Stage 0   : Combinational logic that decodes two triples (4 candidates)
+ *                 in parallel and performs modulus evaluation.
+ *   * Stage 1   : Pipeline register that latches Stage 0 outputs to break
+ *                 combinational timing paths before aggregation.
+ *   * Packer    : 8-slot accumulation buffer that gathers valid coefficients
+ *                 from Stage 1 and dispatches 4-coefficient memory writes.
+ *
+ * Handshake & Flow Control :
+ *   * t_ready_o is registered to decouple upstream combinational paths.
+ *   * done_o pulses high for one cycle once all 256 coefficients are
+ *     delivered and the pipeline has completely drained.
+ */
 
 module sample_ntt #(
     parameter int DWIDTH      = 64,           // Input AXI beat width (bits)

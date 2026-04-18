@@ -1,21 +1,21 @@
-// -----------------------------------------------------------------------------
-// Author      : Salwan Aldhahab
-// Module      : sample_ntt_tb
-// Standard    : FIPS 203 ML-KEM — verification of Algorithm 7 (SampleNTT)
-//
-// Description :
-//   Self-checking testbench for sample_ntt.
-//
-//   1. Generates a deterministic pseudo-random byte stream (input stimulus).
-//   2. Runs the same rejection-sampling algorithm in software to build a
-//      golden list of 256 expected 12-bit coefficients.
-//   3. Drives the byte stream into the DUT over an AXI4-Stream sink.
-//   4. Applies randomised output backpressure (~25 % stall rate).
-//   5. Unpacks each 48-bit output beat into four 12-bit coefficients and
-//      compares lane-by-lane against the golden model.
-//   6. Checks t_last_o timing and t_keep_o correctness.
-//   7. Reports PASS / FAIL at the end.
-// -----------------------------------------------------------------------------
+/*
+ * Author      : Salwan Aldhahab, Kiet Le
+ * Module      : sample_ntt_tb
+ * Standard    : FIPS 203 ML-KEM — Algorithm 7 (SampleNTT)
+ *
+ * Description :
+ *   Self-checking testbench for sample_ntt.
+ *
+ *   1. Generates a deterministic pseudo-random byte stream (input stimulus).
+ *   2. Executes the rejection-sampling algorithm in software to build a
+ *      golden reference of 256 expected 12-bit coefficients.
+ *   3. Drives the byte stream into the DUT via an AXI4-Stream sink.
+ *   4. Applies deterministic output backpressure (1-in-4 cycle stall) to
+ *      verify pipeline flow control.
+ *   5. Monitors the 4-lane polynomial memory writer interface, comparing
+ *      valid coefficients and memory indices against the golden reference.
+ *   6. Terminates and reports PASS/FAIL upon receiving the done_o signal.
+ */
 
 module sample_ntt_tb;
 
