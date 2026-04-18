@@ -48,8 +48,11 @@
 // -----------------------------------------------------------------------------
 
 module sample_poly_cbd #(
-    parameter int DWIDTH     = 64,             // Input AXI beat width (bits)
-    parameter int KEEP_WIDTH = DWIDTH / 8      // Byte-enable width
+    parameter int DWIDTH      = 64,             // Input AXI beat width (bits)
+    parameter int KEEP_WIDTH  = DWIDTH / 8,     // Byte-enable width
+    parameter int COEFF_W     = 12,             // Coefficient data width
+    parameter int NCOEFF      = 256,            // Polynomial degree
+    parameter int COEFF_IDX_W = $clog2(NCOEFF)  // Index width (8 for 256)
 ) (
     input  wire                      clk,
     input  wire                      rst,
@@ -65,12 +68,13 @@ module sample_poly_cbd #(
     input  wire  [KEEP_WIDTH-1:0]    t_keep_i,
     output logic                     t_ready_o,
 
-    // AXI4-Stream Source
-    output logic [47:0]              t_data_o,
-    output logic                     t_valid_o,
-    output logic                     t_last_o,
-    output logic [5:0]               t_keep_o,
-    input  wire                      t_ready_i
+    // Poly Memory Writer Interface
+    output logic [3:0]                         wr_en_o,
+    output logic [3:0][COEFF_IDX_W-1:0]        wr_idx_o,
+    output logic [3:0][COEFF_W-1:0]            wr_data_o,
+    output logic                               wr_valid_o,
+    output logic                               done_o,
+    input  wire                                stall_i
 );
 
     // =========================================================================
@@ -82,11 +86,6 @@ module sample_poly_cbd #(
     typedef enum logic [1:0] {
         S_IDLE, S_RUN
     } state_t;
-
-    typedef struct packed {
-        logic [47:0] data;
-        logic        last;
-    } beat_t;
 
     // =========================================================================
     // 2. REGISTERS
@@ -100,28 +99,25 @@ module sample_poly_cbd #(
     logic               gbx_w1v;
     logic [2:0]         gbx_boff;    // Byte offset within word0 (0 .. 7)
 
-    // 2-entry output circular skid buffer
-    beat_t              oq      [2];
-    logic               oq_head; // read pointer
-    logic               oq_tail; // write pointer
-    logic [1:0]         oq_cnt;  // element count (0, 1, 2)
-
     // Global progress
     logic [8:0]         coeff_count;
 
     // =========================================================================
-    // 3. COMBINATIONAL: AXI Source Output
+    // 3. CBD Sampling (Unified Multiplexer)
     // =========================================================================
-    always_comb begin
-        t_data_o  = oq[oq_head].data;
-        t_valid_o = (oq_cnt != 2'd0);
-        t_last_o  = (oq_cnt != 2'd0) & oq[oq_head].last;
-        t_keep_o  = (oq_cnt != 2'd0) ? 6'h3F : 6'h00;
-    end
 
-    // =========================================================================
-    // 4. COMBINATIONAL: Gearbox Dynamic Read Window
-    // =========================================================================
+    // Fixed 3-bit popcount. If η=2, the top bit is padded with 0.
+    function automatic logic [1:0] popcount3(input logic [2:0] bits);
+        popcount3[0] = bits[0] ^ bits[1] ^ bits[2];
+        popcount3[1] = (bits[0] & bits[1]) | (bits[0] & bits[2]) | (bits[1] & bits[2]);
+    endfunction
+
+    logic [2:0]  x_bits [4];
+    logic [2:0]  y_bits [4];
+    logic [1:0]  cbd_x  [4];
+    logic [1:0]  cbd_y  [4];
+    logic [11:0] cbd_coeff [4];
+
     logic [6:0]  gbx_bit_ptr;
     logic [23:0] raw_chunk; // Always extract 24 bits (3 bytes max)
     logic        have_chunk;
@@ -136,22 +132,6 @@ module sample_poly_cbd #(
 
         have_chunk  = gbx_w0v && ((is_eta3 ? (gbx_boff <= 3'd5) : (gbx_boff <= 3'd6)) || gbx_w1v);
     end
-
-    // =========================================================================
-    // 5. COMBINATIONAL: CBD Sampling (Unified Multiplexer)
-    // =========================================================================
-
-    // Fixed 3-bit popcount. If η=2, the top bit is padded with 0.
-    function automatic logic [1:0] popcount3(input logic [2:0] bits);
-        popcount3[0] = bits[0] ^ bits[1] ^ bits[2];
-        popcount3[1] = (bits[0] & bits[1]) | (bits[0] & bits[2]) | (bits[1] & bits[2]);
-    endfunction
-
-    logic [2:0]  x_bits [4];
-    logic [2:0]  y_bits [4];
-    logic [1:0]  cbd_x  [4];
-    logic [1:0]  cbd_y  [4];
-    logic [11:0] cbd_coeff [4];
 
     always_comb begin
         // Multiplex bits based on current ETA security parameter
@@ -183,19 +163,14 @@ module sample_poly_cbd #(
     // =========================================================================
     // 6. COMBINATIONAL: Next-State Logic
     // =========================================================================
+    logic can_emit;
     state_t              state_nxt;
     logic [DWIDTH-1:0]   gbx_word0_nxt, gbx_word1_nxt;
     logic                gbx_w0v_nxt, gbx_w1v_nxt;
     logic [2:0]          gbx_boff_nxt;
-    beat_t               oq_nxt  [2];
-    logic                oq_head_nxt;
-    logic                oq_tail_nxt;
-    logic [1:0]          oq_cnt_nxt;
     logic [8:0]          coeff_count_nxt;
 
     logic [3:0]          boff_plus_chunk;
-    logic                can_emit;
-    logic                oq_full;
 
     always_comb begin
         state_nxt        = state;
@@ -204,14 +179,10 @@ module sample_poly_cbd #(
         gbx_w0v_nxt      = gbx_w0v;
         gbx_w1v_nxt      = gbx_w1v;
         gbx_boff_nxt     = gbx_boff;
-        oq_nxt[0]        = oq[0];
-        oq_nxt[1]        = oq[1];
-        oq_head_nxt      = oq_head;
-        oq_tail_nxt      = oq_tail;
-        oq_cnt_nxt       = oq_cnt;
         coeff_count_nxt  = coeff_count;
 
         boff_plus_chunk  = 4'd0;
+        can_emit         = 1'b0;
 
         case (state)
             S_IDLE: begin
@@ -220,33 +191,18 @@ module sample_poly_cbd #(
                     gbx_w0v_nxt      = 1'b0;
                     gbx_w1v_nxt      = 1'b0;
                     gbx_boff_nxt     = 3'd0;
-                    oq_head_nxt      = 1'b0;
-                    oq_tail_nxt      = 1'b0;
-                    oq_cnt_nxt       = 2'd0;
                     coeff_count_nxt  = 9'd0;
                 end
             end
 
             S_RUN: begin
-                // Step A: Output Dequeue
-                if ((oq_cnt_nxt != 2'd0) && t_ready_i) begin
-                    oq_head_nxt = ~oq_head_nxt;
-                    oq_cnt_nxt  = oq_cnt_nxt - 2'd1;
-                end
 
                 // Step B: CBD Sampling, Packing, and Gearbox Advance
-                oq_full  = (oq_cnt_nxt == 2'd2);
-                can_emit = have_chunk && !oq_full && (coeff_count_nxt < 9'(TARGET_COEFFS));
+                can_emit = have_chunk && !stall_i && (coeff_count_nxt < 9'(NCOEFF));
 
                 if (can_emit) begin
                     // Emit exactly 4 coefficients
                     coeff_count_nxt = coeff_count_nxt + 9'd4;
-
-                    oq_nxt[oq_tail_nxt].data  = {cbd_coeff[3], cbd_coeff[2], cbd_coeff[1], cbd_coeff[0]};
-                    oq_nxt[oq_tail_nxt].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
-                    
-                    oq_tail_nxt = ~oq_tail_nxt;
-                    oq_cnt_nxt  = oq_cnt_nxt + 2'd1;
 
                     // Advance gearbox dynamically by 2 or 3 bytes
                     boff_plus_chunk = {1'b0, gbx_boff} + 4'(chunk_size);
@@ -274,7 +230,7 @@ module sample_poly_cbd #(
                 end
 
                 // Step D: Completion Check
-                if ((coeff_count_nxt >= 9'(TARGET_COEFFS)) && (oq_cnt_nxt == 2'd0)) begin
+                if (coeff_count_nxt >= 9'(NCOEFF)) begin
                     state_nxt = S_IDLE;
                 end
             end
@@ -293,9 +249,6 @@ module sample_poly_cbd #(
             gbx_w0v      <= 1'b0;
             gbx_w1v      <= 1'b0;
             gbx_boff     <= 3'd0;
-            oq_head      <= 1'b0;
-            oq_tail      <= 1'b0;
-            oq_cnt       <= 2'd0;
             coeff_count  <= 9'd0;
         end else begin
             state        <= state_nxt;
@@ -311,12 +264,24 @@ module sample_poly_cbd #(
             gbx_w0v      <= gbx_w0v_nxt;
             gbx_w1v      <= gbx_w1v_nxt;
             gbx_boff     <= gbx_boff_nxt;
-            oq[0]        <= oq_nxt[0]; oq[1] <= oq_nxt[1];
-            oq_head      <= oq_head_nxt;
-            oq_tail      <= oq_tail_nxt;
-            oq_cnt       <= oq_cnt_nxt;
             coeff_count  <= coeff_count_nxt;
         end
+    end
+
+    // =========================================================================
+    // 8. COMBINATIONAL: Poly Memory Writer Output
+    // =========================================================================
+    always_comb begin
+        wr_en_o   = can_emit ? 4'b1111 : 4'b0000;
+        wr_data_o = {cbd_coeff[3], cbd_coeff[2], cbd_coeff[1], cbd_coeff[0]};
+
+        wr_idx_o[0] = coeff_count[COEFF_IDX_W-1:0];
+        wr_idx_o[1] = coeff_count[COEFF_IDX_W-1:0] + 8'd1;
+        wr_idx_o[2] = coeff_count[COEFF_IDX_W-1:0] + 8'd2;
+        wr_idx_o[3] = coeff_count[COEFF_IDX_W-1:0] + 8'd3;
+
+        wr_valid_o  = can_emit;
+        done_o      = (coeff_count >= 9'(NCOEFF));
     end
 
 endmodule

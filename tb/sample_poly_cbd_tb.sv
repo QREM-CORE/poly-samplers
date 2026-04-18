@@ -45,12 +45,13 @@ module sample_poly_cbd_tb;
     logic [KEEP_WIDTH-1:0]     t_keep_i;
     logic                      t_ready_o;
 
-    // AXI4-Stream Source (from DUT)
-    logic [47:0]               t_data_o;
-    logic                      t_valid_o;
-    logic                      t_last_o;
-    logic [5:0]                t_keep_o;
-    logic                      t_ready_i;
+    // Poly Memory Writer Interface (from DUT)
+    logic [3:0]                wr_en_o;
+    logic [3:0][7:0]           wr_idx_o;
+    logic [3:0][11:0]          wr_data_o;
+    logic                      wr_valid_o;
+    logic                      done_o;
+    logic                      stall_i;
 
     // =====================================================================
     // Test infrastructure
@@ -66,7 +67,7 @@ module sample_poly_cbd_tb;
     always_ff @(posedge clk or posedge rst) begin
         if (rst)
             last_seen <= 1'b0;
-        else if (t_valid_o && t_ready_i && t_last_o)
+        else if (done_o)
             last_seen <= 1'b1;
     end
 
@@ -76,7 +77,10 @@ module sample_poly_cbd_tb;
 
     sample_poly_cbd #(
         .DWIDTH     (DWIDTH),
-        .KEEP_WIDTH (KEEP_WIDTH)
+        .KEEP_WIDTH (KEEP_WIDTH),
+        .COEFF_W    (12),
+        .NCOEFF     (NUM_COEFFS),
+        .COEFF_IDX_W(8)
     ) dut (
         .clk        (clk),
         .rst        (rst),
@@ -87,11 +91,12 @@ module sample_poly_cbd_tb;
         .t_last_i   (t_last_i),
         .t_keep_i   (t_keep_i),
         .t_ready_o  (t_ready_o),
-        .t_data_o   (t_data_o),
-        .t_valid_o  (t_valid_o),
-        .t_last_o   (t_last_o),
-        .t_keep_o   (t_keep_o),
-        .t_ready_i  (t_ready_i)
+        .wr_en_o    (wr_en_o),
+        .wr_idx_o   (wr_idx_o),
+        .wr_data_o  (wr_data_o),
+        .wr_valid_o (wr_valid_o),
+        .done_o     (done_o),
+        .stall_i    (stall_i)
     );
 
     // =====================================================================
@@ -191,11 +196,11 @@ module sample_poly_cbd_tb;
     logic [1:0] bp_cnt;
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
-            t_ready_i <= 1'b0;
-            bp_cnt    <= 2'd0;
+            stall_i <= 1'b0;
+            bp_cnt  <= 2'd0;
         end else begin
-            bp_cnt    <= bp_cnt + 2'd1;
-            t_ready_i <= (bp_cnt != 2'd0);
+            bp_cnt  <= bp_cnt + 2'd1;
+            stall_i <= (bp_cnt == 2'd0);
         end
     end
 
@@ -207,31 +212,22 @@ module sample_poly_cbd_tb;
         if (rst) begin
             observed_count <= 0;
             error_count    <= 0;
-        end else if (t_valid_o && t_ready_i) begin
-
-            if (t_keep_o != 6'h3F) begin
-                $display("ERROR [beat %0d]: t_keep_o = 0x%0h, expected 0x3F", observed_count / 4, t_keep_o);
-                error_count <= error_count + 1;
-            end
-
-            if ((observed_count == NUM_COEFFS - 4) && !t_last_o) begin
-                $display("ERROR: t_last_o not asserted on final beat");
-                error_count <= error_count + 1;
-            end
-            if ((observed_count < NUM_COEFFS - 4) && t_last_o) begin
-                $display("ERROR: t_last_o asserted early at coeff index %0d", observed_count);
-                error_count <= error_count + 1;
-            end
-
+        end else if (wr_valid_o && !stall_i) begin
             for (int lane = 0; lane < 4; lane++) begin
-                automatic int unsigned got = t_data_o[12*lane +: 12];
-                automatic int unsigned idx = observed_count + lane;
-                if (idx >= NUM_COEFFS) begin
-                    $display("ERROR: extra coefficient on lane %0d", lane);
-                    error_count <= error_count + 1;
-                end else if (got !== golden_coeffs[idx][11:0]) begin
-                    $display("ERROR: Coeff[%0d] mismatch — got %0d, expected %0d", idx, got, golden_coeffs[idx]);
-                    error_count <= error_count + 1;
+                if (wr_en_o[lane]) begin
+                    automatic int unsigned got = wr_data_o[lane];
+                    automatic int unsigned idx = wr_idx_o[lane];
+                    
+                    if (idx != observed_count + lane) begin
+                        $display("ERROR: Coeff index mismatch on lane %0d. Expected %0d, got %0d", lane, observed_count + lane, idx);
+                        error_count <= error_count + 1;
+                    end else if (idx >= NUM_COEFFS) begin
+                        $display("ERROR: extra coefficient on lane %0d", lane);
+                        error_count <= error_count + 1;
+                    end else if (got !== golden_coeffs[idx][11:0]) begin
+                        $display("ERROR: Coeff[%0d] mismatch — got %0d, expected %0d", idx, got, golden_coeffs[idx]);
+                        error_count <= error_count + 1;
+                    end
                 end
             end
             observed_count <= observed_count + 4;
@@ -248,8 +244,8 @@ module sample_poly_cbd_tb;
         else begin
             cycle_cnt <= cycle_cnt + 1;
             if (cycle_cnt % 500 == 0)
-                $display("[DBG] cyc=%0d st=%0d coeff=%0d oq_cnt=%0d gbx0v=%0b gbx1v=%0b rdy=%0b val=%0b last=%0b",
-                         cycle_cnt, dut.state, dut.coeff_count, dut.oq_cnt, dut.gbx_w0v, dut.gbx_w1v, t_ready_i, t_valid_o, last_seen);
+                $display("[DBG] cyc=%0d st=%0d coeff=%0d stall=%0b wr_v=%0b done=%0b",
+                         cycle_cnt, dut.state, dut.coeff_count, stall_i, wr_valid_o, done_o);
         end
     end
 

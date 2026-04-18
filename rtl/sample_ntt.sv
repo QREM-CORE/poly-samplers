@@ -73,8 +73,11 @@
 // -----------------------------------------------------------------------------
 
 module sample_ntt #(
-    parameter int DWIDTH     = 64,           // Input AXI beat width (bits)
-    parameter int KEEP_WIDTH = DWIDTH / 8    // Byte-enable width
+    parameter int DWIDTH      = 64,           // Input AXI beat width (bits)
+    parameter int KEEP_WIDTH  = DWIDTH / 8,   // Byte-enable width
+    parameter int COEFF_W     = 12,           // Coefficient data width
+    parameter int NCOEFF      = 256,          // Polynomial degree
+    parameter int COEFF_IDX_W = $clog2(NCOEFF)// Index width (8 for 256)
 ) (
     input  wire                      clk,
     input  wire                      rst,
@@ -89,12 +92,13 @@ module sample_ntt #(
     input  wire  [KEEP_WIDTH-1:0]    t_keep_i,
     output logic                     t_ready_o,
 
-    // AXI4-Stream Source (to downstream consumer)
-    output logic [47:0]              t_data_o,  // 4 × 12-bit packed coefficients
-    output logic                     t_valid_o,
-    output logic                     t_last_o,
-    output logic [5:0]               t_keep_o,  // 6 valid bytes per beat
-    input  wire                      t_ready_i
+    // Poly Memory Writer Interface
+    output logic [3:0]                         wr_en_o,
+    output logic [3:0][COEFF_IDX_W-1:0]        wr_idx_o,
+    output logic [3:0][COEFF_W-1:0]            wr_data_o,
+    output logic                               wr_valid_o,
+    output logic                               done_o,
+    input  wire                                stall_i
 );
 
     // =========================================================================
@@ -110,11 +114,6 @@ module sample_ntt #(
         S_RUN
     } state_t;
 
-    // One entry in the 2-deep output skid buffer.
-    typedef struct packed {
-        logic [47:0] data;
-        logic        last;
-    } beat_t;
 
     // =========================================================================
     // 2. REGISTERS
@@ -147,26 +146,25 @@ module sample_ntt #(
     logic [11:0]        s1_d1_a, s1_d2_a, s1_d1_b, s1_d2_b;
     logic               s1_d1_av, s1_d2_av, s1_d1_bv, s1_d2_bv;
 
-    // -- Coefficient aggregator (collects 4 before emitting a beat) --
-    logic [11:0] agg [4];
-    logic [2:0]  agg_count;     // 0 .. 4
-
-    // -- 2-entry output skid buffer --
-    beat_t       oq      [2];
-    logic        oq_valid[2];
 
     // -- Global progress --
     logic [8:0]  coeff_count;   // 0 .. 256  (9 bits)
 
     // =========================================================================
-    // 3. COMBINATIONAL: AXI Source Output
+    // 3. COMBINATIONAL: Poly Memory Writer Output
     // =========================================================================
 
     always_comb begin
-        t_data_o  = oq[0].data;
-        t_valid_o = oq_valid[0];
-        t_last_o  = oq_valid[0] & oq[0].last;
-        t_keep_o  = oq_valid[0] ? 6'h3F : 6'h00;
+        wr_en_o   = s1_valid ? {s1_d2_bv, s1_d1_bv, s1_d2_av, s1_d1_av} : 4'b0;
+        wr_data_o = {s1_d2_b,  s1_d1_b,  s1_d2_a,  s1_d1_a };
+
+        wr_idx_o[0] = coeff_count[COEFF_IDX_W-1:0];
+        wr_idx_o[1] = coeff_count[COEFF_IDX_W-1:0] + {{(COEFF_IDX_W-1){1'b0}}, s1_d1_av};
+        wr_idx_o[2] = coeff_count[COEFF_IDX_W-1:0] + {{(COEFF_IDX_W-2){1'b0}}, s1_d1_av + s1_d2_av};
+        wr_idx_o[3] = coeff_count[COEFF_IDX_W-1:0] + {{(COEFF_IDX_W-2){1'b0}}, s1_d1_av + s1_d2_av + s1_d1_bv};
+
+        wr_valid_o  = s1_valid && |{s1_d2_bv, s1_d1_bv, s1_d2_av, s1_d1_av};
+        done_o      = (coeff_count >= 9'(NCOEFF)) && !s1_valid;
     end
 
     // =========================================================================
@@ -229,8 +227,6 @@ module sample_ntt #(
     //    Computed once from registered state, used throughout Section 7.
 
     logic [2:0]  s1_accepted;    // Number of valid candidates in Stage 1
-    logic        s1_will_emit;   // Stage 1 processing will complete a beat
-    logic        oq_full;        // Both output-queue slots occupied
     logic        s1_stall;       // Stage 1 cannot drain this cycle
     logic        pipe_advance;   // Pipeline is free to advance
 
@@ -238,15 +234,7 @@ module sample_ntt #(
         s1_accepted  = {2'b0, s1_d1_av} + {2'b0, s1_d2_av}
                      + {2'b0, s1_d1_bv} + {2'b0, s1_d2_bv};
 
-        s1_will_emit = s1_valid
-                     && (({1'b0, agg_count} + {1'b0, s1_accepted}) >= 4'd4);
-
-        oq_full      = oq_valid[0] && oq_valid[1];
-
-        // Stall when Stage 1 would need to enqueue a new beat but the output
-        // queue is full and the downstream consumer is not accepting this cycle.
-        s1_stall     = s1_will_emit && oq_full && !t_ready_i;
-
+        s1_stall     = s1_valid && stall_i;
         pipe_advance = !s1_stall;
     end
 
@@ -275,10 +263,6 @@ module sample_ntt #(
     logic        s1_valid_nxt;
     logic [11:0] s1_d1_a_nxt, s1_d2_a_nxt, s1_d1_b_nxt, s1_d2_b_nxt;
     logic        s1_d1_av_nxt, s1_d2_av_nxt, s1_d1_bv_nxt, s1_d2_bv_nxt;
-    logic [11:0] agg_nxt [4];
-    logic [2:0]  agg_count_nxt;
-    beat_t       oq_nxt  [2];
-    logic        oq_valid_nxt [2];
     logic [8:0]  coeff_count_nxt;
 
     // -- Working signals (combinational, no register) --
@@ -303,12 +287,6 @@ module sample_ntt #(
         s1_d1_b_nxt      = s1_d1_b;   s1_d2_b_nxt  = s1_d2_b;
         s1_d1_av_nxt     = s1_d1_av;  s1_d2_av_nxt = s1_d2_av;
         s1_d1_bv_nxt     = s1_d1_bv;  s1_d2_bv_nxt = s1_d2_bv;
-        agg_nxt[0]       = agg[0];    agg_nxt[1]   = agg[1];
-        agg_nxt[2]       = agg[2];    agg_nxt[3]   = agg[3];
-        agg_count_nxt    = agg_count;
-        oq_nxt[0]        = oq[0];     oq_nxt[1]    = oq[1];
-        oq_valid_nxt[0]  = oq_valid[0];
-        oq_valid_nxt[1]  = oq_valid[1];
         coeff_count_nxt  = coeff_count;
 
         boff_plus6 = 4'd0;
@@ -331,12 +309,6 @@ module sample_ntt #(
                     gbx_w1v_nxt      = 1'b0;
                     gbx_boff_nxt     = 3'd0;
                     s1_valid_nxt     = 1'b0;
-                    agg_nxt[0] = 12'd0;  agg_nxt[1] = 12'd0;
-                    agg_nxt[2] = 12'd0;  agg_nxt[3] = 12'd0;
-                    agg_count_nxt    = 3'd0;
-                    oq_nxt[0]        = '0;  oq_nxt[1] = '0;
-                    oq_valid_nxt[0]  = 1'b0;
-                    oq_valid_nxt[1]  = 1'b0;
                     coeff_count_nxt  = 9'd0;
                 end
             end
@@ -346,13 +318,6 @@ module sample_ntt #(
             // -----------------------------------------------------------------
             S_RUN: begin
 
-                // ── Step A: Output-queue dequeue ─────────────────────────
-                if (oq_valid_nxt[0] && t_ready_i) begin
-                    oq_nxt[0]       = oq_nxt[1];
-                    oq_valid_nxt[0] = oq_valid_nxt[1];
-                    oq_valid_nxt[1] = 1'b0;
-                end
-
                 // ── Step B: AXI beat → wide FIFO ─────────────────────────
                 //    One 256-bit word written per accepted beat (single write
                 //    port).  The actual register write is in always_ff (Sec 8).
@@ -361,37 +326,9 @@ module sample_ntt #(
                     wfifo_count_nxt  = wfifo_count_nxt  + 3'd1;
                 end
 
-                // ── Step D: Stage 1 → Aggregator ─────────────────────────
-                //    Pack up to four candidates into the aggregator; emit a
-                //    48-bit beat every time four coefficients accumulate.
+                // ── Step D: Stage 1 update coeff_count ───────────────────
                 if (s1_valid && pipe_advance) begin
-                    automatic logic [3:0]  s1_v   = {s1_d2_bv, s1_d1_bv, s1_d2_av, s1_d1_av};
-                    automatic logic [11:0] s1_val [4];
-                    s1_val[0] = s1_d1_a; s1_val[1] = s1_d2_a;
-                    s1_val[2] = s1_d1_b; s1_val[3] = s1_d2_b;
-
-                    for (int i = 0; i < 4; i++) begin
-                        if (s1_v[i]) begin
-                            agg_nxt[agg_count_nxt[1:0]] = s1_val[i];
-                            agg_count_nxt   = agg_count_nxt + 3'd1;
-                            coeff_count_nxt = coeff_count_nxt + 9'd1;
-                            if (agg_count_nxt == 3'd4) begin
-                                if (!oq_valid_nxt[0]) begin
-                                    oq_nxt[0].data  = {agg_nxt[3], agg_nxt[2],
-                                                       agg_nxt[1], agg_nxt[0]};
-                                    oq_nxt[0].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
-                                    oq_valid_nxt[0] = 1'b1;
-                                end else begin
-                                    oq_nxt[1].data  = {agg_nxt[3], agg_nxt[2],
-                                                       agg_nxt[1], agg_nxt[0]};
-                                    oq_nxt[1].last  = (coeff_count_nxt == 9'(TARGET_COEFFS));
-                                    oq_valid_nxt[1] = 1'b1;
-                                end
-                                agg_count_nxt = 3'd0;
-                            end
-                        end
-                    end
-
+                    coeff_count_nxt = coeff_count_nxt + {6'b0, s1_accepted};
                     s1_valid_nxt = 1'b0;  // Stage 1 consumed
                 end
                 // else (pipe_advance == 0): Stage 1 held by default.
@@ -466,11 +403,8 @@ module sample_ntt #(
 
                 // ── Step F: Completion check ──────────────────────────────
                 //    Transition to S_IDLE once all coefficients have been
-                //    counted AND the entire pipeline (Stage 1 + aggregator +
-                //    output queue) is fully drained.
+                //    counted AND the pipeline is drained.
                 if ((coeff_count_nxt >= 9'(TARGET_COEFFS))
-                    && !oq_valid_nxt[0] && !oq_valid_nxt[1]
-                    && (agg_count_nxt == 3'd0)
                     && !s1_valid_nxt) begin
                     state_nxt = S_IDLE;
                 end
@@ -505,11 +439,6 @@ module sample_ntt #(
             s1_valid     <= 1'b0;
             s1_d1_av     <= 1'b0;  s1_d2_av <= 1'b0;
             s1_d1_bv     <= 1'b0;  s1_d2_bv <= 1'b0;
-            agg[0]       <= 12'd0;  agg[1] <= 12'd0;
-            agg[2]       <= 12'd0;  agg[3] <= 12'd0;
-            agg_count    <= 3'd0;
-            oq[0]        <= '0;     oq[1]  <= '0;
-            oq_valid[0]  <= 1'b0;   oq_valid[1] <= 1'b0;
             coeff_count  <= 9'd0;
         end else begin
             state        <= state_nxt;
@@ -533,15 +462,6 @@ module sample_ntt #(
             s1_d1_b      <= s1_d1_b_nxt;   s1_d2_b  <= s1_d2_b_nxt;
             s1_d1_av     <= s1_d1_av_nxt;  s1_d2_av <= s1_d2_av_nxt;
             s1_d1_bv     <= s1_d1_bv_nxt;  s1_d2_bv <= s1_d2_bv_nxt;
-            agg[0]       <= agg_nxt[0];
-            agg[1]       <= agg_nxt[1];
-            agg[2]       <= agg_nxt[2];
-            agg[3]       <= agg_nxt[3];
-            agg_count    <= agg_count_nxt;
-            oq[0]        <= oq_nxt[0];
-            oq[1]        <= oq_nxt[1];
-            oq_valid[0]  <= oq_valid_nxt[0];
-            oq_valid[1]  <= oq_valid_nxt[1];
             coeff_count  <= coeff_count_nxt;
 
             // Wide FIFO write: a single DWIDTH-bit assignment per beat.
@@ -569,10 +489,7 @@ module sample_ntt #(
         (t_valid_i && !t_ready_o) |=> $stable(t_data_i) && $stable(t_keep_i) && $stable(t_last_i))
         else $error("AXI sink: signals changed during backpressure");
 
-    // AXI source: output stable while back-pressured.
-    assert property (@(posedge clk) disable iff (rst)
-        (t_valid_o && !t_ready_i) |=> $stable(t_data_o) && $stable(t_keep_o) && $stable(t_last_o))
-        else $error("AXI source: signals changed during backpressure");
+
 
     // synthesis translate_on
 
