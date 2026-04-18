@@ -46,12 +46,13 @@ module sample_ntt_tb;
     logic [KEEP_WIDTH-1:0]     t_keep_i;
     logic                      t_ready_o;
 
-    // AXI4-Stream Source (from DUT)
-    logic [47:0]               t_data_o;
-    logic                      t_valid_o;
-    logic                      t_last_o;
-    logic [5:0]                t_keep_o;
-    logic                      t_ready_i;
+    // Poly Memory Writer Interface (from DUT)
+    logic [3:0]                wr_en_o;
+    logic [3:0][7:0]           wr_idx_o;
+    logic [3:0][11:0]          wr_data_o;
+    logic                      wr_valid_o;
+    logic                      done_o;
+    logic                      stall_i;
 
     // =====================================================================
     // Test infrastructure
@@ -70,7 +71,7 @@ module sample_ntt_tb;
     always_ff @(posedge clk or posedge rst) begin
         if (rst)
             last_seen <= 1'b0;
-        else if (t_valid_o && t_ready_i && t_last_o)
+        else if (done_o)
             last_seen <= 1'b1;
     end
 
@@ -90,11 +91,12 @@ module sample_ntt_tb;
         .t_last_i   (t_last_i),
         .t_keep_i   (t_keep_i),
         .t_ready_o  (t_ready_o),
-        .t_data_o   (t_data_o),
-        .t_valid_o  (t_valid_o),
-        .t_last_o   (t_last_o),
-        .t_keep_o   (t_keep_o),
-        .t_ready_i  (t_ready_i)
+        .wr_en_o    (wr_en_o),
+        .wr_idx_o    (wr_idx_o),
+        .wr_data_o   (wr_data_o),
+        .wr_valid_o  (wr_valid_o),
+        .done_o      (done_o),
+        .stall_i     (stall_i)
     );
 
     // =====================================================================
@@ -126,8 +128,8 @@ module sample_ntt_tb;
         golden_coeffs.delete();
         idx = 0;
         while ((idx + 2 < stimulus_bytes.size()) && (golden_coeffs.size() < NUM_COEFFS)) begin
-            d1 = stimulus_bytes[idx] + ((stimulus_bytes[idx+1] & 8'h0F) << 8);
-            d2 = ((stimulus_bytes[idx+1] >> 4) & 8'h0F) + (stimulus_bytes[idx+2] << 4);
+            d1 = int'(stimulus_bytes[idx]) + (int'(stimulus_bytes[idx+1] & 8'h0F) << 8);
+            d2 = (int'(stimulus_bytes[idx+1]) >> 4) + (int'(stimulus_bytes[idx+2]) << 4);
 
             if ((d1 < Q) && (golden_coeffs.size() < NUM_COEFFS))
                 golden_coeffs.push_back(d1);
@@ -187,11 +189,11 @@ module sample_ntt_tb;
     logic [1:0] bp_cnt;
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
-            t_ready_i <= 1'b0;
-            bp_cnt    <= 2'd0;
+            stall_i <= 1'b0;
+            bp_cnt  <= 2'd0;
         end else begin
-            bp_cnt    <= bp_cnt + 2'd1;
-            t_ready_i <= (bp_cnt != 2'd0);  // low 1-in-4 cycles
+            bp_cnt  <= bp_cnt + 2'd1;
+            stall_i <= (bp_cnt == 2'd0);  // stall 1-in-4 cycles
         end
     end
 
@@ -203,42 +205,34 @@ module sample_ntt_tb;
         if (rst) begin
             observed_count <= 0;
             error_count    <= 0;
-        end else if (t_valid_o && t_ready_i) begin
-
-            // -- Check t_keep_o --
-            if (t_keep_o != 6'h3F) begin
-                $display("ERROR [beat %0d]: t_keep_o = 0x%0h, expected 0x3F",
-                         observed_count / 4, t_keep_o);
-                error_count <= error_count + 1;
-            end
-
-            // -- Check t_last_o timing --
-            if ((observed_count == NUM_COEFFS - 4) && !t_last_o) begin
-                $display("ERROR: t_last_o not asserted on final beat");
-                error_count <= error_count + 1;
-            end
-            if ((observed_count < NUM_COEFFS - 4) && t_last_o) begin
-                $display("ERROR: t_last_o asserted early at coeff index %0d", observed_count);
-                error_count <= error_count + 1;
-            end
-
+        end else if (wr_valid_o && !stall_i) begin
+            automatic int expected_idx = observed_count;
             // -- Check each of the 4 coefficient lanes --
             for (int lane = 0; lane < 4; lane++) begin
-                automatic int unsigned got = t_data_o[12*lane +: 12];
-                automatic int unsigned idx = observed_count + lane;
-                if (idx >= NUM_COEFFS) begin
-                    $display("ERROR: extra coefficient on lane %0d", lane);
-                    error_count <= error_count + 1;
-                end else if (got !== golden_coeffs[idx][11:0]) begin
-                    $display("ERROR: Coeff[%0d] mismatch — got %0d, expected %0d",
-                             idx, got, golden_coeffs[idx]);
-                    error_count <= error_count + 1;
+                if (wr_en_o[lane]) begin
+                    automatic int unsigned got = wr_data_o[lane];
+                    automatic int unsigned idx = wr_idx_o[lane];
+
+                    if (idx >= NUM_COEFFS) begin
+                        $display("ERROR: extra coefficient at index %0d", idx);
+                        error_count <= error_count + 1;
+                    end else if (got !== golden_coeffs[idx][11:0]) begin
+                        $display("ERROR: Coeff[%0d] mismatch — got %0d, expected %0d",
+                                 idx, got, golden_coeffs[idx]);
+                        error_count <= error_count + 1;
+                    end
+
+                    // Check that the DUT's index matches our expectation
+                    if (idx != expected_idx) begin
+                        $display("ERROR: Index mismatch — got %0d, expected %0d",
+                                 idx, expected_idx);
+                        error_count <= error_count + 1;
+                    end
+
+                    expected_idx++;
                 end
             end
-
-            $display("[TB] Output beat %0d: coeffs %0d-%0d  t_last=%0b",
-                     observed_count / 4, observed_count, observed_count + 3, t_last_o);
-            observed_count <= observed_count + 4;
+            observed_count <= expected_idx;
         end
     end
 
@@ -253,8 +247,8 @@ module sample_ntt_tb;
         else begin
             cycle_cnt <= cycle_cnt + 1;
             if (cycle_cnt % 500 == 0)
-                $display("[DBG] cyc=%0d st=%0d wfifo=%0d coeff=%0d oq0v=%0b oq1v=%0b agg=%0d rdy=%0b val=%0b last=%0b",
-                         cycle_cnt, dut.state, dut.wfifo_count, dut.coeff_count, dut.oq_valid[0], dut.oq_valid[1], dut.agg_count, t_ready_i, t_valid_o, last_seen);
+                $display("[DBG] cyc=%0d st=%0d wfifo=%0d coeff=%0d rdy=%0b out_v=%0b done=%0b",
+                         cycle_cnt, dut.state, dut.wfifo_count, dut.coeff_count, t_ready_o, wr_valid_o, done_o);
         end
     end
 
@@ -263,6 +257,10 @@ module sample_ntt_tb;
     // =====================================================================
 
     initial begin
+        $display("==========================================================");
+        $display("Starting Unified sample_ntt Testbench");
+        $display("==========================================================");
+
         // -- Initialise --
         rst       = 1'b1;
         start     = 1'b0;
@@ -273,7 +271,9 @@ module sample_ntt_tb;
 
         generate_stimulus();
         build_golden_model();
-        $display("[TB] Golden model built: %0d coefficients from %0d bytes.",
+
+        $display("\n[TB] -----------------------------------------------------");
+        $display("[TB] Testing SampleNTT. Golden model: %0d coeffs from %0d bytes.",
                  golden_coeffs.size(), stimulus_bytes.size());
 
         // -- Release reset --
@@ -294,7 +294,7 @@ module sample_ntt_tb;
             end
             begin : watchdog
                 for (int _wd = 0; _wd < 50_000; _wd++) @(posedge clk);
-                $fatal(1, "TIMEOUT: DUT did not assert t_last_o within 50 000 cycles");
+                $fatal(1, "TIMEOUT: DUT did not assert done_o within 50 000 cycles");
             end
         join_any
         disable fork;
@@ -309,8 +309,11 @@ module sample_ntt_tb;
         if (error_count != 0)
             $fatal(1, "FAIL: %0d mismatches detected", error_count);
 
-        $display("PASS: sample_ntt produced %0d coefficients matching the golden model.",
-                 NUM_COEFFS);
+        $display("[TB] PASS: sample_ntt perfectly matched golden model.");
+
+        $display("==========================================================");
+        $display("ALL TESTS PASSED: sample_ntt verified!");
+        $display("==========================================================");
         $finish;
     end
 

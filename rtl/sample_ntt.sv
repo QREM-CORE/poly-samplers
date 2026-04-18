@@ -160,8 +160,8 @@ module sample_ntt #(
 
         wr_idx_o[0] = coeff_count[COEFF_IDX_W-1:0];
         wr_idx_o[1] = coeff_count[COEFF_IDX_W-1:0] + {{(COEFF_IDX_W-1){1'b0}}, s1_d1_av};
-        wr_idx_o[2] = coeff_count[COEFF_IDX_W-1:0] + {{(COEFF_IDX_W-2){1'b0}}, s1_d1_av + s1_d2_av};
-        wr_idx_o[3] = coeff_count[COEFF_IDX_W-1:0] + {{(COEFF_IDX_W-2){1'b0}}, s1_d1_av + s1_d2_av + s1_d1_bv};
+        wr_idx_o[2] = coeff_count[COEFF_IDX_W-1:0] + {{(COEFF_IDX_W-2){1'b0}}, {1'b0, s1_d1_av} + {1'b0, s1_d2_av}};
+        wr_idx_o[3] = coeff_count[COEFF_IDX_W-1:0] + {{(COEFF_IDX_W-2){1'b0}}, {1'b0, s1_d1_av} + {1'b0, s1_d2_av} + {1'b0, s1_d1_bv}};
 
         wr_valid_o  = s1_valid && |{s1_d2_bv, s1_d1_bv, s1_d2_av, s1_d1_av};
         done_o      = (coeff_count >= 9'(NCOEFF)) && !s1_valid;
