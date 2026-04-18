@@ -217,7 +217,7 @@ module sample_poly_cbd_tb;
                 if (wr_en_o[lane]) begin
                     automatic int unsigned got = wr_data_o[lane];
                     automatic int unsigned idx = wr_idx_o[lane];
-                    
+
                     if (idx != observed_count + lane) begin
                         $display("ERROR: Coeff index mismatch on lane %0d. Expected %0d, got %0d", lane, observed_count + lane, idx);
                         error_count <= error_count + 1;
