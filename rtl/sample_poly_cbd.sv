@@ -102,16 +102,18 @@ module sample_poly_cbd #(
     logic [11:0] cbd_coeff [4];
 
     logic [6:0]  gbx_bit_ptr;
+    logic [2*DWIDTH-1:0] gbx_concat;
     logic [23:0] raw_chunk; // Always extract 24 bits (3 bytes max)
     logic        have_chunk;
     logic [2:0]  chunk_size; // Dynamically 2 or 3
 
     always_comb begin
+        gbx_concat  = {gbx_word1, gbx_word0};
         chunk_size  = is_eta3 ? 3'd3 : 3'd2;
         gbx_bit_ptr = {1'b0, gbx_boff, 3'b000};           // gbx_boff * 8 (7 bits)
 
         // Extract maximum possible chunk to avoid variable width slicing
-        raw_chunk   = {gbx_word1, gbx_word0}[gbx_bit_ptr +: 24];
+        raw_chunk   = gbx_concat[gbx_bit_ptr +: 24];
 
         have_chunk  = gbx_w0v && ((is_eta3 ? (gbx_boff <= 3'd5) : (gbx_boff <= 3'd6)) || gbx_w1v);
     end
